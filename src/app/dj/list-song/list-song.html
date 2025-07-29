@@ -1,0 +1,49 @@
+<div class="song-list-container h-[27rem]">
+  @if (songs.length === 0) {
+    <div class="empty-state">
+      <p>No songs available</p>
+    </div>
+  }
+  @for (song of songs; track song; let i = $index) {
+    <div class="song-item">
+      <div class="flex w-full bg-zinc-950 text-white rounded-lg shadow-md mb-3 overflow-hidden">
+        <!-- Cover -->
+        <img [src]="song.coverUrl" alt="Cover" class="w-[80px] h-[70px] object-cover"/>
+
+        <!-- Song Info -->
+        <div class="flex flex-col justify-between px-4 py-2 w-full">
+          <div class="overflow-hidden">
+            <h3 class="text-sm font-semibold truncate">{{ song.title }}</h3>
+            <p class="text-xs text-gray-400 truncate">{{ song.artists }}</p>
+            <div class="flex justify-between">
+              <p class="text-xs text-gray-500">Duracion / {{ song.duration }}</p>
+              @if (song.bpm) {
+                <p class="text-xs text-green-500 font-semibold mr-2">{{ song.bpm }} BPM</p>
+              }
+            </div>
+          </div>
+        </div>
+
+        <!-- Green SVG for first track -->
+        @if (i === 0) {
+          <svg class="mt-6 mr-2"
+               xmlns="http://www.w3.org/2000/svg"
+               height="24px" viewBox="0 -960 960 960" width="24px"
+               fill="#75FB4C">
+            <path d="M480-200q-117 0-198.5-81.5T200-480q0-117 81.5-198.5T480-760q117 0 198.5 81.5T760-480q0 117-81.5 198.5T480-200Z"/>
+          </svg>
+        }
+
+        <!-- Yellow SVG for second track -->
+        @if (i === 1) {
+          <svg class="mt-6 mr-2"
+               xmlns="http://www.w3.org/2000/svg"
+               height="24px" viewBox="0 -960 960 960" width="24px"
+               fill="#FFFF00">
+            <path d="M480-200q-117 0-198.5-81.5T200-480q0-117 81.5-198.5T480-760q117 0 198.5 81.5T760-480q0 117-81.5 198.5T480-200Z"/>
+          </svg>
+        }
+      </div>
+    </div>
+  }
+</div>

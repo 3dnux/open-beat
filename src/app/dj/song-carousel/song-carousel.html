@@ -1,0 +1,51 @@
+<div class="m-4 inline-flex relative">
+    <!-- Blurred Background for Current Song -->
+    @if (songs.length > 0) {
+      <div class="absolute w-[400px] h-[400px] rounded-full blur-3xl opacity-30 z-10"
+           [style.background-image]="'url(' + songs[0].coverUrl + ')'"
+           style="top: -125px; left: -15px; background-size: cover; background-position: center;"></div>
+    }
+
+    <!-- Current Song -->
+    @if (songs.length > 0) {
+      <div style="zoom: 80%"
+           class="flex-none ml-4 z-40 w-[370px] h-[150px] bg-zinc-900 text-white rounded-lg shadow-md flex snap-start mx-auto">
+
+        <!-- Cover -->
+        <img [src]="songs[0].coverUrl" alt="Cover"
+             class="w-[100px] h-full object-cover rounded-l-lg"/>
+        <!-- Info -->
+        <div class="flex flex-col justify-between px-4 py-2 w-full">
+          <div class="overflow-hidden w-[230px]">
+            <h3 class="text-sm font-semibold truncate">{{ songs[0].title }}</h3>
+            <p class="text-xs text-gray-400 truncate">{{ songs[0].artists }}</p>
+            @if (songs[0].composer) {
+              <p class="text-xs text-gray-500 truncate">Compositor: {{ songs[0].composer }}</p>
+            }
+            <div class="flex justify-between">
+              <p class="text-xs text-gray-500">{{ songs[0].currentTime }} / {{ songs[0].duration }}</p>
+              @if (songs[0].bpm) {
+                <p class="text-xs text-green-500 font-semibold">{{ songs[0].bpm }} BPM</p>
+              }
+            </div>
+          </div>
+          <!-- Waveform -->
+          <div class="mt-1 flex items-end space-x-[1px] h-8 overflow-hidden">
+            @for (val of songs[0].waveformData; track $index; let i = $index) {
+              <div
+                class="w-[1.4px] bg-gray-700"
+                [style.height.%]="val"
+                [class.bg-green-500]="i * 100 / songs[0].waveformData.length < (songs[0].progress || 0)"
+              ></div>
+            }
+          </div>
+        </div>
+      </div>
+    }
+
+    <!-- Next Song -->
+    @if (songs.length > 1) {
+      <div class="h-[110px] z-30 -ml-16 mt-1 w-[110px] bg-cover bg-center rounded-full"
+         [style.background-image]="'url(' + songs[1].coverUrl + ')'"></div>
+    }
+</div>

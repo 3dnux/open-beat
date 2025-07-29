@@ -1,0 +1,26 @@
+.film-strip {
+  /* Make sure the width is enough to accommodate all items */
+  width: max-content;
+  /* Animation properties */
+  animation: filmStrip 30s linear infinite;
+  position: relative;
+}
+
+@keyframes filmStrip {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    /* Move to the left by the width of the original 5 items */
+    transform: translateX(calc(-100px * 5 - 0.75rem * 5));
+  }
+}
+
+
+.film-strip::before {
+  top: -5px;
+}
+
+.film-strip::after {
+  bottom: -5px;
+}
