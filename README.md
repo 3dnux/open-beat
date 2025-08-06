@@ -1,59 +1,78 @@
-# HeyDj
+# Open Beat
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.0.4.
+![img.png](img.png)
 
-## Development server
+Open Beat es una aplicación de DJ moderna e inteligente que utiliza tecnologías de inteligencia artificial para mejorar la experiencia de mezcla de música. La aplicación ofrece análisis de audio avanzado, detección de BPM, transiciones inteligentes entre canciones y más.
 
-To start a local development server, run:
+## Características
 
-```bash
-ng serve
+- **Interfaz de DJ intuitiva**: Carrusel de canciones y artistas para una navegación fácil
+- **Análisis de audio con IA**: Procesamiento avanzado de audio utilizando TensorFlow.js y Magenta
+- **Detección automática de BPM**: Identifica automáticamente el tempo de las canciones
+- **Transiciones inteligentes**: Crea transiciones suaves entre canciones
+- **Análisis emocional**: Analiza el contenido emocional de la música
+- **Gestión de metadatos**: Extrae y gestiona metadatos de archivos de música
+- **Visualización de carátulas**: Muestra las carátulas de los álbumes
+
+## Tecnologías utilizadas
+
+- **Frontend**: Angular 20
+- **Estilos**: Tailwind CSS
+- **Audio**:
+  - Howler.js para reproducción de audio
+  - Tone.js para síntesis y procesamiento de audio
+  - Music-metadata para análisis de metadatos
+- **Inteligencia Artificial**:
+  - TensorFlow.js para procesamiento de audio con IA
+  - Magenta para generación y análisis musical
+  - Essentia.js y Meyda para análisis de audio
+  - ML-Matrix para operaciones matriciales
+
+## Requisitos previos
+
+- Node.js (versión 18 o superior)
+- npm (versión 9 o superior)
+
+## Instalación
+
+1. Clona el repositorio:
+   ```
+   git clone https://github.com/tu-usuario/open-beat.git
+   cd open-beat
+   ```
+
+2. Instala las dependencias:
+   ```
+   npm install
+   ```
+
+3. Inicia la aplicación en modo desarrollo:
+   ```
+   npm start
+   ```
+
+4. Abre tu navegador y visita `http://localhost:4200`
+
+## Compilación para producción
+
+Para compilar la aplicación para producción:
+
+```
+npm run build
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+Los archivos compilados se encontrarán en el directorio `dist/`.
 
-## Code scaffolding
+## Pruebas
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+Para ejecutar las pruebas unitarias:
 
-```bash
-ng generate component component-name
+```
+npm test
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+## Estructura del proyecto
 
-```bash
-ng generate --help
-```
-
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+- `src/app/dj/` - Componentes de la interfaz de DJ
+- `src/app/home/` - Componentes de la página principal
+- `src/app/services/` - Servicios para procesamiento de audio, análisis y reproducción
