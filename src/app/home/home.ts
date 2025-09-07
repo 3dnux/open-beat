@@ -7,17 +7,21 @@
  * If jschardet fails to detect the encoding or if there's an error, it falls back to
  * the default decodeURIComponent behavior.
  */
-import {ChangeDetectionStrategy, Component, AfterViewInit} from '@angular/core';
+import {ChangeDetectionStrategy, Component, AfterViewInit, OnDestroy} from '@angular/core';
 import {SongCarousel, Song} from '../dj/song-carousel/song-carousel';
 import {ListSong} from '../dj/list-song/list-song';
+import { FormsModule } from '@angular/forms';
+import { CommonModule } from '@angular/common';
 import * as jschardet from 'jschardet';
 import { AlbumArtService } from '../services/album-art.service';
+import { DjEngineService } from '../services/dj-engine.service';
 import { BpmDetectionService } from '../services/bpm-detection.service';
 import { DjTransitionService } from '../services/dj-transition.service';
 import { MetadataService } from '../services/metadata.service';
 import { AIAudioProcessingService } from '../services/ai-audio-processing.service';
 import { HowlerAudioService } from '../services/howler-audio.service';
 import { EmotionAnalysisService } from '../services/emotion-analysis.service';
+import { AutoDjService } from '../services/auto-dj.service';
 
 export interface songUpload {
   url: string;
@@ -33,6 +37,8 @@ export interface playlists {
 @Component({
   selector: 'app-home',
   imports: [
+    CommonModule,
+    FormsModule,
     SongCarousel,
     ListSong
   ],
@@ -40,7 +46,7 @@ export interface playlists {
   styleUrl: './home.scss',
   changeDetection: ChangeDetectionStrategy.Default
 })
-export class Home implements AfterViewInit {
+export class Home implements AfterViewInit, OnDestroy {
 
 
   playlistsApp: playlists[] = [
@@ -211,6 +217,8 @@ export class Home implements AfterViewInit {
   private updateInterval: any;
   private transitionStarted: boolean = false;
   private transitionFallbackSet: boolean = false;
+  // Prefer WebAudio (FX Router + DJ Engine) by default; set true to test Howler engine
+  private useHowlerEngine: boolean = false;
 
   // Web Audio API context and nodes for 3D audio
   private audioContext: AudioContext | null = null;
@@ -238,6 +246,8 @@ export class Home implements AfterViewInit {
 
   // Audio analyzer for frequency analysis
   private analyzer: AnalyserNode | null = null;
+  // FX Router inserted between master gain and post-sum chain
+  private fxRouter?: ReturnType<AIAudioProcessingService['buildFxRouter']>;
 
   // DJ transition nodes
   private transitionNodes: {
@@ -251,6 +261,10 @@ export class Home implements AfterViewInit {
     nextGain: GainNode
   } | null = null;
 
+  // DJ Controls state
+  fxIntensity: number = 0.6; // 0-1
+  djMode: 'suave' | 'medio' | 'intenso' = 'medio';
+
   // Store event listener functions as properties so they can be properly removed
   private updateProgressListener = () => this.updateSongProgress();
   private currentSongEndedListener: (() => void) | null = null;
@@ -258,6 +272,15 @@ export class Home implements AfterViewInit {
   // AI analysis properties
   private aiAnalysisInterval: any;
   private previousBassEnergy: number = 0;
+  // NUEVO: referencia para detener FX “divertidos”
+  private stopFunFxScheduler?: () => void;
+  // Analyzer worker instance
+  private djWorker?: Worker;
+
+  // UI background animation controls and visibility handler
+  private waveResizeHandler: (() => void) | null = null;
+  private waveRafId: number | null = null;
+  private visibilityHandler: (() => void) | null = null;
 
   constructor(
     private albumArtService: AlbumArtService,
@@ -266,54 +289,34 @@ export class Home implements AfterViewInit {
     private metadataService: MetadataService,
     private aiAudioProcessingService: AIAudioProcessingService,
     private howlerAudioService: HowlerAudioService,
-    private emotionAnalysisService: EmotionAnalysisService
+    private emotionAnalysisService: EmotionAnalysisService,
+    private djEngine: DjEngineService,
+    private autoDj: AutoDjService
   ) {
     this.populateSongsFromUrls();
 
-    // Initialize Web Audio API context
-    try {
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      console.log('AudioContext initialized for enhanced 3D audio with improved quality');
-
-      // Create a master gain node
-      this.gainNode = this.audioContext.createGain();
-      this.gainNode.gain.value = 1.0;
-      this.gainNode.connect(this.audioContext.destination);
-
-      // Set up listener for 3D audio
-      this.listenerNode = this.audioContext.listener;
-
-      // Position the listener at the center of the audio space
-      if (this.listenerNode.positionX) {
-        // Modern browsers support direct position setting
-        this.listenerNode.positionX.value = 0;
-        this.listenerNode.positionY.value = 0;
-        this.listenerNode.positionZ.value = 0;
-
-        // Set listener orientation (facing forward)
-        // forward x, y, z (0, 0, -1) means facing forward
-        // up x, y, z (0, 1, 0) means "up" is in the positive y direction
-        this.listenerNode.forwardX.value = 0;
-        this.listenerNode.forwardY.value = 0;
-        this.listenerNode.forwardZ.value = -1;
-        this.listenerNode.upX.value = 0;
-        this.listenerNode.upY.value = 1;
-        this.listenerNode.upZ.value = 0;
-      } else {
-        // Fallback for older browsers
-        this.listenerNode.setPosition(0, 0, 0);
-        this.listenerNode.setOrientation(0, 0, -1, 0, 1, 0);
-      }
-
-      // Create reverb effect for spatial ambience
-      this.createReverbEffect();
-    } catch (e) {
-      console.error('Error initializing AudioContext:', e);
-    }
+    // Audio engine will be initialized on first user gesture (Play)
   }
 
   ngAfterViewInit(): void {
     this.initWaveBackground();
+    // Handle tab visibility to suspend/resume audio contexts
+    this.visibilityHandler = () => {
+      try {
+        if (document.hidden) {
+          if (this.audioContext && this.audioContext.state === 'running') {
+            this.audioContext.suspend();
+          }
+          this.howlerAudioService.suspendContext();
+        } else {
+          if (this.audioContext && this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+          }
+          this.howlerAudioService.resumeContext();
+        }
+      } catch {}
+    };
+    document.addEventListener('visibilitychange', this.visibilityHandler);
   }
 
   private initWaveBackground(): void {
@@ -322,45 +325,153 @@ export class Home implements AfterViewInit {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     let width = window.innerWidth;
-    let height = 260;
+    const height = 260;
     canvas.width = width;
     canvas.height = height;
     // Responsive resize
-    window.addEventListener('resize', () => {
+    this.waveResizeHandler = () => {
       width = window.innerWidth;
       canvas.width = width;
       canvas.height = height;
-    });
+    };
+    window.addEventListener('resize', this.waveResizeHandler);
     // Wave parameters
     const waves = [
       { amplitude: 32, wavelength: 320, speed: 0.015, color: 'rgba(0,255,180,0.18)' },
       { amplitude: 18, wavelength: 180, speed: 0.022, color: 'rgba(0,180,255,0.13)' },
       { amplitude: 12, wavelength: 90, speed: 0.03, color: 'rgba(255,255,255,0.09)' }
     ];
-    function drawWaves(time: number) {
-      if (ctx) {
-        ctx.clearRect(0, 0, width, height);
-
-        waves.forEach((wave, idx) => {
-          ctx.beginPath();
-          for (let x = 0; x <= width; x += 2) {
-            const y = height/2 + Math.sin((x/wave.wavelength) + (time*wave.speed) + idx) * wave.amplitude;
-            if (x === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.strokeStyle = wave.color;
-          ctx.lineWidth = 3;
-          ctx.stroke();
-        });
-      }
-    }
-    function animate(time: number) {
+    const drawWaves = (time: number) => {
+      ctx.clearRect(0, 0, width, canvas.height);
+      waves.forEach((wave, idx) => {
+        ctx.beginPath();
+        for (let x = 0; x <= width; x += 2) {
+          const y = canvas.height/2 + Math.sin((x/wave.wavelength) + (time*wave.speed) + idx) * wave.amplitude;
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = wave.color;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      });
+    };
+    const animate = (time: number) => {
       drawWaves(time/1000);
-      requestAnimationFrame(animate);
-    }
-    animate(0);
+      this.waveRafId = requestAnimationFrame(animate);
+    };
+    this.waveRafId = requestAnimationFrame(animate);
   }
 
+
+  /**
+   * Initializes the Web Audio engine on first user gesture
+   */
+  private startAudioEngine(): void {
+    if (this.audioContext) return;
+    try {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // Create a master gain node
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.gain.value = 1.0;
+      // Set up listener for 3D audio
+      this.listenerNode = this.audioContext.listener;
+      const ln: any = this.listenerNode as any;
+      if (ln && ln.positionX) {
+        ln.positionX.value = 0;
+        ln.positionY.value = 0;
+        ln.positionZ.value = 0;
+        ln.forwardX.value = 0;
+        ln.forwardY.value = 0;
+        ln.forwardZ.value = -1;
+        ln.upX.value = 0;
+        ln.upY.value = 1;
+        ln.upZ.value = 0;
+      } else if (ln) {
+        ln.setPosition(0, 0, 0);
+        ln.setOrientation(0, 0, -1, 0, 1, 0);
+      }
+      // Minimal reverb chain
+      this.createReverbEffect();
+      // Build and insert FX Router between master gain and post-sum chain
+      try {
+        this.fxRouter = this.aiAudioProcessingService.buildFxRouter(this.audioContext);
+        // Route: gainNode -> fxRouter.input -> DjEngine(post-sum) -> destination
+        this.gainNode.connect(this.fxRouter.input);
+        try { this.djEngine.init(this.audioContext, this.fxRouter.output); } catch (e) {
+          console.warn('DjEngine init failed, falling back direct to destination', e);
+          this.fxRouter.output.connect(this.audioContext.destination);
+        }
+        console.log('FX Router inserted: delay/reverb/filter available');
+      } catch (routerErr) {
+        console.warn('Failed to build/insert FX Router, routing master directly', routerErr);
+        try { this.djEngine.init(this.audioContext, this.gainNode); } catch (e) { console.warn('DjEngine init failed, falling back direct to destination', e); this.gainNode.connect(this.audioContext.destination); }
+      }
+      console.log('AudioContext initialized for enhanced 3D audio (on user gesture)');
+    } catch (e) {
+      console.error('Error initializing AudioContext:', e);
+    }
+  }
+
+  private startAutoDjIfReady(firstSong: Song) {
+    try {
+      if (!this.audioContext || !this.fxRouter) return;
+      const currentMeta = {
+        id: firstSong.songUrl,
+        title: firstSong.title,
+        artist: firstSong.artists,
+        bpm: firstSong.bpm || 120,
+        genre: firstSong.genre,
+        energy: 0.7
+      };
+      const candidatesProvider = () => {
+        const list: any[] = [];
+        for (const s of this.songs) {
+          if (!s.songUrl || s.songUrl === firstSong.songUrl) continue;
+          list.push({ id: s.songUrl, title: s.title, artist: s.artists, bpm: s.bpm || 120, genre: s.genre, energy: 0.6 });
+        }
+        return list;
+      };
+      const masterInsert = this.fxRouter.output;
+      this.autoDj.start({ ctx: this.audioContext, masterInsert, fxRouter: this.fxRouter, currentSong: currentMeta as any, candidatesProvider });
+      console.log('Auto-DJ started');
+    } catch (e) {
+      console.warn('Failed to start Auto-DJ:', e);
+    }
+  }
+
+  /**
+   * Tears down HTML5 audio elements and Web Audio nodes to avoid leaks/duplication
+   */
+  private teardownHtmlAudio(): void {
+    try {
+      if (this.currentAudioPlayer) {
+        try { this.currentAudioPlayer.removeEventListener('timeupdate', this.updateProgressListener); } catch {}
+        try { if (this.currentSongEndedListener) this.currentAudioPlayer.removeEventListener('ended', this.currentSongEndedListener); } catch {}
+        try { this.currentAudioPlayer.pause(); } catch {}
+      }
+      if (this.nextAudioPlayer) {
+        try { this.nextAudioPlayer.pause(); } catch {}
+      }
+      this.currentAudioPlayer = null;
+      this.nextAudioPlayer = null;
+
+      const nodes: (AudioNode | null)[] = [
+        this.currentSourceNode, this.nextSourceNode, this.currentPannerNode, this.nextPannerNode,
+        this.reverbNode, this.reverbGain, this.dryGain,
+        this.currentDelayNode, this.currentFeedbackGain, this.currentDelayMix, this.currentDryMix,
+        this.nextDelayNode, this.nextFeedbackGain, this.nextDelayMix, this.nextDryMix,
+        this.analyzer
+      ];
+      nodes.forEach(n => { try { n && n.disconnect(); } catch {} });
+      this.currentSourceNode = this.nextSourceNode = null;
+      this.currentPannerNode = this.nextPannerNode = null;
+      this.reverbNode = this.reverbGain = this.dryGain = null;
+      this.currentDelayNode = this.currentFeedbackGain = this.currentDelayMix = this.currentDryMix = null;
+      this.nextDelayNode = this.nextFeedbackGain = this.nextDelayMix = this.nextDryMix = null;
+      this.analyzer = null;
+    } catch (e) {
+      console.warn('Error tearing down HTML Audio pipeline', e);
+    }
+  }
 
   /**
    * Creates a minimal reverb effect for enhanced 3D audio
@@ -438,7 +549,12 @@ export class Home implements AfterViewInit {
   }
 
   playFirstSong(): void {
-    if (this.songs.length === 0 || !this.audioContext) return;
+    if (this.songs.length === 0) return;
+
+    // Initialize audio engine on first user gesture if needed
+    if (!this.audioContext) {
+      this.startAudioEngine();
+    }
 
     const firstSong = this.songs[0];
 
@@ -461,11 +577,13 @@ export class Home implements AfterViewInit {
       return;
     }
 
-    // Try to initialize with Howler for better audio quality
-    if (this.initializeWithHowler()) {
+    // Try to initialize with Howler for better audio quality (optional)
+    if (this.useHowlerEngine && this.initializeWithHowler()) {
       console.log('Using Howler.js for enhanced audio quality and smoother transitions');
       // Analyze emotion and apply effects for the first song
       this.analyzeAndApplyEmotionEffects(firstSong);
+      // Start autonomous DJ if available
+      try { this.startAutoDjIfReady(firstSong); } catch {}
       return;
     }
 
@@ -595,8 +713,12 @@ export class Home implements AfterViewInit {
 
       if (this.currentAudioPlayer) {
         this.currentAudioPlayer.play();
+        // Start real-time analyzer for dynamic FX based on energy
+        try { this.startRealTimeAnalysis(); } catch {}
         // Analyze emotion and apply effects for the first song
         this.analyzeAndApplyEmotionEffects(firstSong);
+        // Start autonomous DJ if available (HTML5 path)
+        try { this.startAutoDjIfReady(firstSong); } catch {}
       }
       firstSong.isPlaying = true;
     }
@@ -710,6 +832,13 @@ export class Home implements AfterViewInit {
       this.currentFeedbackGain = processingNodes.feedbackGain;
       this.currentDelayMix = processingNodes.delayMix;
       this.currentDryMix = processingNodes.dryMix;
+      try {
+        const song = this.songs[0];
+        if (song && this.audioContext) {
+          const meta: any = { id: song.songUrl, title: song.title, artist: song.artists, bpm: song.bpm || 120 };
+          this.djEngine.attachCurrent(sourceNode, meta);
+        }
+      } catch {}
     } else {
       this.nextSourceNode = sourceNode;
       this.nextPannerNode = pannerNode;
@@ -718,6 +847,13 @@ export class Home implements AfterViewInit {
       this.nextFeedbackGain = processingNodes.feedbackGain;
       this.nextDelayMix = processingNodes.delayMix;
       this.nextDryMix = processingNodes.dryMix;
+      try {
+        const song = this.songs[1];
+        if (song && this.audioContext) {
+          const meta: any = { id: song.songUrl, title: song.title, artist: song.artists, bpm: song.bpm || 120 };
+          this.djEngine.attachNext(sourceNode, meta);
+        }
+      } catch {}
     }
   }
 
@@ -1259,10 +1395,16 @@ export class Home implements AfterViewInit {
     const nextBpm = nextSong.bpm || 128; // Default to 128 if not detected
 
     console.log(`Transition between songs: Current BPM: ${currentBpm}, Next BPM: ${nextBpm}`);
-
+      
+    // Kick off DJ engine transition (EQ moves + FX) quantized to bars
+    try {
+      this.djEngine.start();
+      void this.djEngine.planTransition('long-blend', 32);
+    } catch {}
+      
     // Calculate remaining time of current song
     const remainingTime = this.currentAudioPlayer.duration - this.currentAudioPlayer.currentTime;
-
+      
     // Aggressively preload the next song to ensure it's ready to play
     if (this.nextAudioPlayer.readyState < 4) { // HAVE_ENOUGH_DATA = 4
       console.log('Ensuring next song is fully loaded before transition');
@@ -2543,6 +2685,9 @@ this.audioContext?.currentTime || 0
     try {
       if (this.songs.length === 0) return false;
 
+      // Ensure HTML5 audio pipeline is fully torn down before using Howler
+      this.teardownHtmlAudio();
+
       const firstSong = this.songs[0];
 
       // Set up the transition complete callback
@@ -2768,6 +2913,36 @@ this.audioContext?.currentTime || 0
         song.bpm = bpm;
         console.log(`Detected BPM for "${song.title}": ${bpm}`);
 
+        // Kick off analyzer worker for richer metadata (beatgrid, key, structure)
+        try {
+          if (typeof Worker !== 'undefined') {
+            if (!this.djWorker) {
+              // Use bundler-friendly URL for Angular
+              this.djWorker = new Worker(new URL('../workers/dj-analyzer.worker', import.meta.url), { type: 'module' });
+            }
+            const pcmData = audioBuffer.getChannelData(0);
+            const pcm = new Float32Array(pcmData.length);
+            pcm.set(pcmData);
+            const songId = song.songUrl;
+            this.djWorker.onmessage = (ev: MessageEvent) => {
+              const msg: any = ev.data;
+              if (!msg || !msg.ok || !msg.result) return;
+              if (msg.id !== songId) return;
+              const { bpm: analyzedBpm, beatgrid, key, structure } = msg.result;
+              if (analyzedBpm && !isNaN(analyzedBpm)) {
+                // Optionally trust worker BPM if reasonable
+                song.bpm = song.bpm || analyzedBpm;
+              }
+              (song as any).beatgrid = beatgrid;
+              (song as any).keyCamelot = key;
+              (song as any).structure = structure;
+            };
+            this.djWorker.postMessage({ type: 'analyze', pcm, sampleRate: this.audioContext!.sampleRate, id: songId }, [pcm.buffer]);
+          }
+        } catch (err) {
+          console.warn('Analyzer worker failed:', err);
+        }
+
         // Clean up
         tempContext.close();
       } catch (error: any) {
@@ -2848,6 +3023,51 @@ this.audioContext?.currentTime || 0
           );
         }
       }
+
+      // Apply a timed FX plan on the inserted FX Router based on emotion (audible)
+      if (this.audioContext && this.fxRouter) {
+        const bpm = song.bpm || 120;
+        try { this.fxRouter.setDelayTempo(bpm, 4); } catch {}
+        const plan = {
+          reverb: Math.min(0.6, Math.max(0, (emotionResult as any).suggestedEffects?.reverb ?? 0.2)),
+          delay: Math.min(0.5, Math.max(0, (emotionResult as any).suggestedEffects?.delay ?? 0.15)),
+          delayTime: 60 / bpm / 4,
+          feedback: 0.25,
+          applyAt: this.audioContext.currentTime + 0.2,
+          duration: 3.0
+        };
+        try { this.aiAudioProcessingService.applyPlannedEffects(this.audioContext, this.fxRouter, plan, bpm); } catch {}
+        // Add a quick reverb duck for punch moments
+        try { setTimeout(() => this.fxRouter?.pulseReverbDuck(-10, 0.2), 250); } catch {}
+        console.log('Emotion FX plan applied on FX Router with BPM sync');
+      }
+
+      // === NUEVO: arrancar scheduler de FX divertidos beat-synced ===
+      if (this.audioContext && this.gainNode) {
+        if (this.stopFunFxScheduler) {
+          try { this.stopFunFxScheduler(); } catch {}
+          this.stopFunFxScheduler = undefined;
+        }
+
+        const bpm = song.bpm || 120;
+        const pullContext = () => {
+          const energy = emotionResult.characteristics.energy ?? 0.6;
+          const arousal = emotionResult.characteristics.arousal ?? 0.6;
+          let phase: 'build-up' | 'drop' | 'breakdown' | 'transition' | 'steady' = 'steady';
+          if (arousal > 0.8) phase = 'build-up';
+          if (energy > 0.8) phase = 'drop';
+          return { phase, energy, valence: emotionResult.characteristics.valence, arousal };
+        };
+        const reverbBus = this.reverbNode || undefined;
+        this.stopFunFxScheduler = this.aiAudioProcessingService.startBeatSyncedFunFxScheduler({
+          audioContext: this.audioContext,
+          masterNode: this.gainNode,
+          bpm,
+          reverbBus,
+          pullContext
+        });
+      }
+      // === FIN NUEVO ===
       
       console.log(`Applied emotion-based effects for "${song.title}" - DJ enhancement complete`);
       
@@ -2863,26 +3083,37 @@ this.audioContext?.currentTime || 0
    */
   private startRealTimeAnalysis(): void {
     if (!this.audioContext) return;
-    
-    const analyser = this.audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    
+
+    // Reuse existing analyzer if already created
+    if (!this.analyzer) {
+      this.analyzer = this.audioContext.createAnalyser();
+      this.analyzer.fftSize = 2048;
+
+      // Tap current source (HTML5 pipeline) if present
+      try {
+        if (this.currentSourceNode) {
+          this.currentSourceNode.connect(this.analyzer);
+        }
+      } catch {}
+    }
+
+    const analyser = this.analyzer;
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
+
     const analyze = () => {
       analyser.getByteFrequencyData(dataArray);
-      
+
       // Detectar drops, builds, breakdowns
       const energyProfile = this.calculateEnergyProfile(dataArray);
       const currentTime = this.howlerAudioService.getCurrentPosition();
-      
+
       // Predecir y aplicar efectos automáticamente
       this.predictAndApplyEffects(energyProfile, currentTime);
-      
+
       requestAnimationFrame(analyze);
     };
-    
+
     analyze();
   }
 
@@ -2982,6 +3213,138 @@ this.audioContext?.currentTime || 0
     if (Object.keys(effects).length > 0) {
       this.howlerAudioService.applyAIEffectChain(effects);
     }
+  }
+
+  // === DJ Controls helpers and triggers ===
+  private getModeFactor(): number {
+    switch (this.djMode) {
+      case 'suave': return 0.7;
+      case 'intenso': return 1.3;
+      default: return 1.0;
+    }
+  }
+
+  private applyFxPlanScaled(plan: {
+    reverb: number,
+    delay: number,
+    delayTime: number,
+    feedback: number,
+    applyAt?: number,
+    duration?: number
+  }, bpm: number) {
+    if (!this.audioContext || !this.fxRouter) return;
+    const factor = Math.min(1.5, Math.max(0.3, this.fxIntensity * this.getModeFactor()));
+
+    const scaled = {
+      ...plan,
+      reverb: Math.max(0, Math.min(0.8, plan.reverb * factor)),
+      delay: Math.max(0, Math.min(0.7, plan.delay * factor)),
+      feedback: Math.max(0.05, Math.min(0.5, plan.feedback * (0.8 + (factor - 1) * 0.5))),
+      duration: plan.duration ? Math.max(0.8, Math.min(6.0, plan.duration * (0.9 + (factor - 1) * 0.4))) : undefined
+    };
+
+    this.aiAudioProcessingService.applyPlannedEffects(this.audioContext, this.fxRouter, scaled, bpm);
+  }
+
+  triggerFilterSweep(beats: number = 4, open: boolean = true) {
+    if (!this.audioContext || !this.fxRouter) return;
+    const bpm = this.songs[0]?.bpm || 120;
+    const spb = 60 / Math.max(1, bpm);
+    const duration = beats * spb;
+
+    const start = this.audioContext.currentTime + 0.05;
+    const end = start + duration;
+    const filter = this.fxRouter.insertFilter;
+
+    filter.type = 'lowpass';
+    filter.Q.setValueAtTime(0.9, start);
+    filter.frequency.setValueAtTime(open ? 400 : 12000, start);
+    filter.frequency.linearRampToValueAtTime(open ? 12000 : 400, end);
+  }
+
+  triggerDelayFill(subdivision: 2 | 4 | 8 = 8, beats: number = 2) {
+    if (!this.audioContext || !this.fxRouter) return;
+    const bpm = this.songs[0]?.bpm || 120;
+    this.fxRouter.setDelayTempo(bpm, subdivision);
+    const start = this.audioContext.currentTime + 0.05;
+    const duration = beats * (60 / Math.max(1, bpm));
+    const end = start + duration;
+
+    this.fxRouter.setDelayWet(0.3 * this.fxIntensity, start, end);
+    this.fxRouter.setDelayFeedback(0.3, start);
+  }
+
+  triggerDropPunch() {
+    if (!this.audioContext || !this.fxRouter) return;
+    this.fxRouter.pulseReverbDuck(-12, 0.2);
+  }
+
+  ngOnDestroy(): void {
+    // Remove document visibility handler
+    try {
+      if (this.visibilityHandler) {
+        document.removeEventListener('visibilitychange', this.visibilityHandler);
+      }
+    } catch {}
+
+    // Remove window resize listener for background waves
+    try {
+      if (this.waveResizeHandler) {
+        window.removeEventListener('resize', this.waveResizeHandler);
+      }
+    } catch {}
+
+    // Cancel background animation frame
+    try {
+      if (this.waveRafId !== null) {
+        cancelAnimationFrame(this.waveRafId);
+        this.waveRafId = null;
+      }
+    } catch {}
+
+    // Clear intervals
+    try { if (this.updateInterval) { clearInterval(this.updateInterval); this.updateInterval = null; } } catch {}
+    try { if (this.aiAnalysisInterval) { clearInterval(this.aiAnalysisInterval); this.aiAnalysisInterval = null; } } catch {}
+
+    // Detach audio element listeners and pause
+    try { if (this.currentAudioPlayer && this.updateProgressListener) this.currentAudioPlayer.removeEventListener('timeupdate', this.updateProgressListener); } catch {}
+    try { if (this.currentAudioPlayer && this.currentSongEndedListener) this.currentAudioPlayer.removeEventListener('ended', this.currentSongEndedListener); } catch {}
+    try { this.currentAudioPlayer?.pause(); } catch {}
+    try { this.nextAudioPlayer?.pause(); } catch {}
+
+    // Stop beat-synced fun FX scheduler
+    try {
+      if (this.stopFunFxScheduler) {
+        this.stopFunFxScheduler();
+        this.stopFunFxScheduler = undefined;
+      }
+    } catch {}
+
+    // Dispose FX Router
+    try { if (this.fxRouter) { this.fxRouter.dispose(); this.fxRouter = undefined; } } catch {}
+
+    // Teardown HTML audio/WebAudio pipeline
+    this.teardownHtmlAudio();
+
+    // Teardown Howler resources
+    try {
+      this.howlerAudioService.teardown();
+    } catch {}
+
+    // Stop DJ engine loop
+    try { this.djEngine.stop(); } catch {}
+    // Stop Auto-DJ loop
+    try { this.autoDj.stop(); } catch {}
+
+    // Terminate analyzer worker
+    try { this.djWorker?.terminate(); this.djWorker = undefined; } catch {}
+
+    // Close/suspend our AudioContext
+    try {
+      if (this.audioContext && this.audioContext.state !== 'closed') {
+        this.audioContext.close();
+      }
+    } catch {}
   }
 
 }

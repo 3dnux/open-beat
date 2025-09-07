@@ -662,4 +662,77 @@ export class EmotionAnalysisService {
     
     return nodes;
   }
+
+  // NUEVO: variante con routing dry/wet y tempo-sync opcional
+  applyEmotionEffectsAdvanced(
+    audioContext: AudioContext,
+    sourceNode: AudioNode,
+    emotion: EmotionType,
+    options?: { intensity?: number; bpm?: number }
+  ): { output: AudioNode, nodes: AudioNode[] } {
+    const intensity = options?.intensity ?? 1;
+    const profile = (this as any).emotionProfiles?.[emotion]?.effects || (this as any).emotionProfiles?.calm?.effects || {
+      reverb: 0.3, delay: 0.2, eq: { bass: 0, mid: 0, treble: 0 }
+    };
+
+    const nodes: AudioNode[] = [];
+    const input = audioContext.createGain();
+    const output = audioContext.createGain();
+    sourceNode.connect(input);
+
+    // Dry path
+    const dry = audioContext.createGain();
+    dry.gain.value = 1.0;
+    input.connect(dry);
+    dry.connect(output);
+    nodes.push(input, dry, output);
+
+    // Reverb send (parallel)
+    if (profile.reverb > 0) {
+      const convolver = audioContext.createConvolver();
+      const revSend = audioContext.createGain();
+      const revOut = audioContext.createGain();
+      revSend.gain.value = profile.reverb * intensity;
+      revOut.gain.value = 1.0;
+
+      input.connect(revSend);
+      revSend.connect(convolver);
+      convolver.connect(revOut);
+      revOut.connect(output);
+      nodes.push(convolver, revSend, revOut);
+    }
+
+    // Delay (parallel) with controlled feedback
+    if (profile.delay > 0) {
+      const delay = audioContext.createDelay(1.2);
+      const delSend = audioContext.createGain();
+      const delOut = audioContext.createGain();
+      const feedback = audioContext.createGain();
+
+      const spb = options?.bpm ? 60 / Math.max(1, options.bpm) : 0.3;
+      delay.delayTime.value = options?.bpm ? spb / 4 : 0.3; // 1/4 if BPM provided
+      delSend.gain.value = profile.delay * intensity;
+      feedback.gain.value = 0.25;
+
+      input.connect(delSend);
+      delSend.connect(delay);
+      delay.connect(delOut);
+      delOut.connect(output);
+
+      // feedback loop with safe gain
+      delay.connect(feedback);
+      feedback.connect(delay);
+
+      nodes.push(delay, delSend, delOut, feedback);
+    }
+
+    // EQ insert on grouped output
+    const low = audioContext.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 320; low.gain.value = (profile.eq?.bass ?? 0) * intensity;
+    const mid = audioContext.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1000; mid.Q.value = 0.5; mid.gain.value = (profile.eq?.mid ?? 0) * intensity;
+    const high = audioContext.createBiquadFilter(); high.type = 'highshelf'; high.frequency.value = 3200; high.gain.value = (profile.eq?.treble ?? 0) * intensity;
+
+    output.connect(low); low.connect(mid); mid.connect(high);
+
+    return { output: high, nodes: nodes.concat([low, mid, high]) };
+  }
 }

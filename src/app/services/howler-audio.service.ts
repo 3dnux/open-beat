@@ -358,6 +358,58 @@ export class HowlerAudioService {
     this.onTransitionComplete = callback;
   }
 
+  /**
+   * Suspends Howler's AudioContext (if available)
+   */
+  suspendContext(): void {
+    try {
+      if ((Howler as any).ctx && (Howler as any).ctx.state === 'running') {
+        (Howler as any).ctx.suspend?.();
+      }
+    } catch (e) {
+      console.warn('Failed to suspend Howler context', e);
+    }
+  }
+
+  /**
+   * Resumes Howler's AudioContext (if available)
+   */
+  resumeContext(): void {
+    try {
+      if ((Howler as any).ctx && (Howler as any).ctx.state === 'suspended') {
+        (Howler as any).ctx.resume?.();
+      }
+    } catch (e) {
+      console.warn('Failed to resume Howler context', e);
+    }
+  }
+
+  /**
+   * Fully tears down current and next Howler sounds and clears effect chain
+   */
+  teardown(): void {
+    try {
+      // Stop and unload current
+      if (this.currentSound) {
+        try { this.currentSound.stop(); } catch {}
+        try { this.currentSound.unload(); } catch {}
+      }
+      // Stop and unload next
+      if (this.nextSound) {
+        try { this.nextSound.stop(); } catch {}
+        try { this.nextSound.unload(); } catch {}
+      }
+      this.currentSound = null;
+      this.nextSound = null;
+      this.currentSoundData = null;
+      this.nextSoundData = null;
+      this.isTransitioning = false;
+      this.clearEffectChain();
+    } catch (e) {
+      console.warn('Error during Howler teardown', e);
+    }
+  }
+
   // Nuevos efectos avanzados
   private effectChain: AudioNode[] = [];
   private masterGain: GainNode | null = null;

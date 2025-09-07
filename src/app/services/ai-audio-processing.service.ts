@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import * as tf from '@tensorflow/tfjs';
+let tf: any;
 
 // Interface for storing learning data
 interface AudioAnalysisData {
@@ -110,14 +110,18 @@ export class AIAudioProcessingService {
 
   async loadYamnetModel() {
     if (!this.yamnetModel) {
-      this.yamnetModel = await tf.loadGraphModel('https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1');
+      if (!tf) {
+        const mod = await import('@tensorflow/tfjs');
+        tf = mod as any;
+      }
+      this.yamnetModel = await (tf as any).loadGraphModel('https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1');
     }
   }
 
   constructor() {
     // Load any previously saved learning data from localStorage
     this.loadLearningData();
-    this.loadYamnetModel();
+    // Defer model loading until first use to reduce initial bundle/TTI
   }
 
   /**
@@ -1554,5 +1558,401 @@ export class AIAudioProcessingService {
     if (bpmDiff <= 10) return 6;
     if (bpmDiff <= 20) return 8;
     return 12;
+  }
+
+  // === NUEVO: Utilidades de cuantización al beat ===
+  private secondsPerBeat(bpm: number): number {
+    return 60 / Math.max(1, bpm);
+  }
+
+  private quantizeTime(audioContext: AudioContext, bpm: number, subdivision: 1 | 2 | 4 | 8 = 4, lookAhead = 0.05): number {
+    const spb = this.secondsPerBeat(bpm);
+    const grid = spb / subdivision;
+    const now = audioContext.currentTime + lookAhead;
+    const steps = Math.ceil(now / grid);
+    return steps * grid;
+  }
+
+  private quantizeBars(audioContext: AudioContext, bpm: number, bars = 1, lookAhead = 0.05): number {
+    const spb = this.secondsPerBeat(bpm);
+    const bar = spb * 4; // 4/4
+    const now = audioContext.currentTime + lookAhead;
+    const steps = Math.ceil(now / (bar * bars));
+    return steps * (bar * bars);
+  }
+
+  // === NUEVO: Creadores de efectos reutilizables ===
+  private createBeatDelay(audioContext: AudioContext, bpm: number, subdivision: 2 | 4 | 8 = 8, feedbackAmt = 0.3, wet = 0.2) {
+    const delay = audioContext.createDelay(1.0);
+    const feedback = audioContext.createGain();
+    const wetGain = audioContext.createGain();
+    const dryGain = audioContext.createGain();
+
+    const delayTime = this.secondsPerBeat(bpm) / subdivision;
+    delay.delayTime.value = delayTime;
+    feedback.gain.value = feedbackAmt;
+    wetGain.gain.value = wet;
+    dryGain.gain.value = 1.0;
+
+    delay.connect(feedback);
+    feedback.connect(delay);
+
+    return {
+      input: { wet: delay, dry: dryGain },
+      output: audioContext.createGain(),
+      delay,
+      feedback,
+      wetGain,
+      dryGain,
+      connectUpstream: (source: AudioNode) => {
+        source.connect(delay);
+        source.connect(dryGain);
+      },
+      connectDownstream: (destination: AudioNode) => {
+        delay.connect(wetGain);
+        wetGain.connect(destination);
+        dryGain.connect(destination);
+      },
+      dispose: () => {
+        try {
+          delay.disconnect();
+          feedback.disconnect();
+          wetGain.disconnect();
+          dryGain.disconnect();
+        } catch {}
+      }
+    };
+  }
+
+  private createFilterSweep(audioContext: AudioContext, startFreq: number, endFreq: number, q = 0.7, duration = 2.0, type: BiquadFilterType = 'lowpass') {
+    const filter = audioContext.createBiquadFilter();
+    filter.type = type;
+    filter.Q.value = q;
+
+    const now = audioContext.currentTime;
+    filter.frequency.setValueAtTime(startFreq, now);
+    filter.frequency.linearRampToValueAtTime(endFreq, now + Math.max(0.05, duration));
+
+    return {
+      node: filter,
+      stopAt: now + duration,
+      dispose: () => {
+        try { filter.disconnect(); } catch {}
+      }
+    };
+  }
+
+  private createDuckingReverbSend(audioContext: AudioContext, reverbNode: AudioNode, duckDb = -10) {
+    const send = audioContext.createGain();
+    const duck = audioContext.createGain();
+
+    send.gain.value = 0.2;
+    const factor = Math.pow(10, duckDb / 20);
+    duck.gain.value = factor;
+
+    send.connect(duck);
+    duck.connect(reverbNode);
+
+    return {
+      send,
+      duck,
+      pulse: (duration = 0.25) => {
+        const now = audioContext.currentTime;
+        duck.gain.cancelScheduledValues(now);
+        duck.gain.setValueAtTime(factor, now);
+        duck.gain.linearRampToValueAtTime(1.0, now + duration);
+      },
+      dispose: () => {
+        try {
+          send.disconnect();
+          duck.disconnect();
+        } catch {}
+      }
+    };
+  }
+
+  // === NUEVO: Sugerencias “divertidas” según contexto para disparar FX ===
+  private decideFunFxForMoment(context: {
+    phase: 'build-up' | 'drop' | 'breakdown' | 'transition' | 'steady',
+    energy: number,
+    valence?: number,
+    arousal?: number
+  }): Array<{ type: 'filter-sweep' | 'beat-repeat' | 'duck-reverb', intensity: number, durationBeats?: number, sweep?: 'open' | 'close' }> {
+    const out: Array<{ type: 'filter-sweep' | 'beat-repeat' | 'duck-reverb', intensity: number, durationBeats?: number, sweep?: 'open' | 'close' }> = [];
+    const { phase, energy, arousal = 0.5 } = context;
+
+    if (phase === 'build-up') {
+      out.push({ type: 'filter-sweep', intensity: 0.8, durationBeats: 4, sweep: 'open' });
+      if (arousal > 0.6) out.push({ type: 'beat-repeat', intensity: 0.5, durationBeats: 2 });
+    } else if (phase === 'drop') {
+      out.push({ type: 'duck-reverb', intensity: 0.7, durationBeats: 1 });
+    } else if (phase === 'transition') {
+      out.push({ type: 'filter-sweep', intensity: 0.5, durationBeats: 2, sweep: 'open' });
+    } else if (phase === 'breakdown') {
+      out.push({ type: 'filter-sweep', intensity: 0.4, durationBeats: 4, sweep: 'close' });
+    } else {
+      if (energy > 0.75) {
+        out.push({ type: 'beat-repeat', intensity: 0.4, durationBeats: 1 });
+      }
+    }
+
+    return out;
+  }
+
+  // === NUEVO: Scheduler de FX sincronizados al beat ===
+  public startBeatSyncedFunFxScheduler(params: {
+    audioContext: AudioContext,
+    masterNode: AudioNode,
+    bpm: number,
+    reverbBus?: AudioNode,
+    pullContext: () => {
+      phase: 'build-up' | 'drop' | 'breakdown' | 'transition' | 'steady',
+      energy: number, valence?: number, arousal?: number
+    }
+  }): () => void {
+    const { audioContext, masterNode, bpm, reverbBus, pullContext } = params;
+
+    let disposed = false;
+    const activeDisposers: Array<() => void> = [];
+    let lastScheduledBarTime = 0;
+    const lastFire: any = { 'filter-sweep': 0, 'beat-repeat': 0, 'duck-reverb': 0 };
+    const minIntervalBeats: any = { 'filter-sweep': 4, 'beat-repeat': 2, 'duck-reverb': 1 };
+
+    const scheduleWindow = () => {
+      if (disposed) return;
+
+      const nextBar = this.quantizeBars(audioContext, bpm, 1, 0.05);
+      if (nextBar !== lastScheduledBarTime) {
+        lastScheduledBarTime = nextBar;
+
+        const ctx = pullContext();
+        const suggestions = this.decideFunFxForMoment(ctx);
+
+        for (const s of suggestions) {
+          if (s.type === 'filter-sweep') {
+            const beats = Math.max(1, s.durationBeats ?? 2);
+            const duration = beats * this.secondsPerBeat(bpm);
+            const start = s.sweep === 'close' ? 12000 : 400;
+            const end = s.sweep === 'close' ? 400 : 12000;
+            const filter = this.createFilterSweep(audioContext, start, end, 0.8, duration, 'lowpass');
+
+            try { (masterNode as any).disconnect?.(); } catch {}
+            const splitter = audioContext.createGain();
+            splitter.gain.value = 1.0;
+
+            splitter.connect(filter.node);
+            filter.node.connect(audioContext.destination);
+
+            (masterNode as AudioNode).connect(splitter);
+
+            const cleanupAt = audioContext.currentTime + duration + 0.1;
+            const cleaner = () => {
+              try {
+                splitter.disconnect();
+                filter.node.disconnect();
+                (masterNode as any).disconnect?.();
+                (masterNode as AudioNode).connect(audioContext.destination);
+              } catch {}
+              filter.dispose();
+            };
+            activeDisposers.push(cleaner);
+            setTimeout(cleaner, (cleanupAt - audioContext.currentTime) * 1000);
+          }
+
+          if (s.type === 'beat-repeat') {
+            const beats = Math.max(1, s.durationBeats ?? 1);
+            const duration = beats * this.secondsPerBeat(bpm);
+
+            const effect = this.createBeatDelay(audioContext, bpm, 8, 0.35, 0.25);
+            try { (masterNode as any).disconnect?.(); } catch {}
+            (masterNode as AudioNode).connect(effect.delay);
+            (masterNode as AudioNode).connect(effect.dryGain);
+            effect.delay.connect(effect.feedback);
+            effect.feedback.connect(effect.delay);
+
+            const wetOut = audioContext.createGain();
+            wetOut.gain.value = 0.0;
+
+            effect.delay.connect(wetOut);
+            wetOut.connect(audioContext.destination);
+            effect.dryGain.connect(audioContext.destination);
+
+            const t0 = nextBar;
+            wetOut.gain.setValueAtTime(0.0, t0);
+            wetOut.gain.linearRampToValueAtTime(0.3, t0 + duration * 0.2);
+            wetOut.gain.linearRampToValueAtTime(0.0, t0 + duration);
+
+            const cleaner = () => {
+              try {
+                wetOut.disconnect();
+                effect.dispose();
+                (masterNode as any).disconnect?.();
+                (masterNode as AudioNode).connect(audioContext.destination);
+              } catch {}
+            };
+            activeDisposers.push(cleaner);
+            setTimeout(cleaner, (t0 + duration - audioContext.currentTime + 0.1) * 1000);
+          }
+
+          if (s.type === 'duck-reverb' && reverbBus) {
+            const duck = this.createDuckingReverbSend(audioContext, reverbBus, -12);
+            const hits = 2;
+            for (let i = 0; i < hits; i++) {
+              const t = this.quantizeTime(audioContext, bpm, 1, 0.05) + i * this.secondsPerBeat(bpm);
+              setTimeout(() => duck.pulse(0.2), (t - audioContext.currentTime) * 1000);
+            }
+            const cleaner = () => duck.dispose();
+            activeDisposers.push(cleaner);
+            setTimeout(cleaner, (this.quantizeBars(audioContext, bpm, 1) - audioContext.currentTime + 1.0) * 1000);
+          }
+        }
+      }
+
+      if (!disposed) {
+        requestAnimationFrame(scheduleWindow);
+      }
+    };
+
+    requestAnimationFrame(scheduleWindow);
+
+    return () => {
+      disposed = true;
+      for (const d of activeDisposers) {
+        try { d(); } catch {}
+      }
+    };
+  }
+
+  // === NUEVO: router de FX reutilizable ===
+  public buildFxRouter(audioContext: AudioContext, options?: { reverbNode?: ConvolverNode }): {
+    input: GainNode;
+    output: GainNode;
+    // delay bus
+    delay: DelayNode;
+    delayWet: GainNode;
+    delayFeedback: GainNode;
+    setDelayTempo(bpm: number, subdivision: 2 | 4 | 8): void;
+    setDelayWet(value: number, at?: number, endAt?: number): void;
+    setDelayFeedback(value: number, at?: number, endAt?: number): void;
+    // reverb bus
+    reverbSend: GainNode;
+    reverbNode: ConvolverNode;
+    setReverbSend(value: number, at?: number, endAt?: number): void;
+    pulseReverbDuck(reductionDb?: number, duration?: number): void;
+    // insert filter
+    insertFilter: BiquadFilterNode;
+    dispose(): void;
+  } {
+    const input = audioContext.createGain();
+    const output = audioContext.createGain();
+
+    // Delay bus
+    const delay = audioContext.createDelay(1.2);
+    const delayWet = audioContext.createGain();
+    const delayFeedback = audioContext.createGain();
+    delay.delayTime.value = 0.25;
+    delayWet.gain.value = 0.0;
+    delayFeedback.gain.value = 0.25;
+
+    delay.connect(delayFeedback);
+    delayFeedback.connect(delay);
+
+    // Reverb bus
+    const reverbSend = audioContext.createGain();
+    reverbSend.gain.value = 0.0;
+    const reverbNode = options?.reverbNode || audioContext.createConvolver();
+    const reverbOut = audioContext.createGain();
+    reverbOut.gain.value = 1.0;
+
+    // Insert filter
+    const insertFilter = audioContext.createBiquadFilter();
+    insertFilter.type = 'peaking';
+    insertFilter.frequency.value = 1000;
+    insertFilter.Q.value = 0.8;
+    insertFilter.gain.value = 0;
+
+    // Routing: input -> insert -> output
+    input.connect(insertFilter);
+    insertFilter.connect(output);
+
+    // Sends paralelos
+    input.connect(delay);
+    delay.connect(delayWet);
+    delayWet.connect(output);
+
+    input.connect(reverbSend);
+    reverbSend.connect(reverbNode);
+    reverbNode.connect(reverbOut);
+    reverbOut.connect(output);
+
+    const setParam = (param: AudioParam, value: number, at?: number, endAt?: number) => {
+      const now = audioContext.currentTime;
+      const t0 = at ?? now;
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(value, t0);
+      if (endAt && endAt > t0) {
+        param.linearRampToValueAtTime(0, endAt);
+      }
+    };
+
+    return {
+      input,
+      output,
+      delay,
+      delayWet,
+      delayFeedback,
+      setDelayTempo: (bpm: number, subdivision: 2 | 4 | 8) => {
+        delay.delayTime.setValueAtTime(this.secondsPerBeat(bpm) / subdivision, audioContext.currentTime);
+      },
+      setDelayWet: (value: number, at?: number, endAt?: number) => setParam(delayWet.gain, value, at, endAt),
+      setDelayFeedback: (value: number, at?: number, endAt?: number) => setParam(delayFeedback.gain, value, at, endAt),
+      reverbSend,
+      reverbNode,
+      setReverbSend: (value: number, at?: number, endAt?: number) => setParam(reverbSend.gain, value, at, endAt),
+      pulseReverbDuck: (reductionDb: number = -12, duration: number = 0.25) => {
+        const factor = Math.pow(10, reductionDb / 20);
+        const now = audioContext.currentTime;
+        reverbSend.gain.cancelScheduledValues(now);
+        const current = reverbSend.gain.value;
+        reverbSend.gain.setValueAtTime(current * factor, now);
+        reverbSend.gain.linearRampToValueAtTime(current, now + duration);
+      },
+      insertFilter,
+      dispose: () => {
+        try {
+          input.disconnect();
+          insertFilter.disconnect();
+          output.disconnect();
+          delay.disconnect();
+          delayWet.disconnect();
+          delayFeedback.disconnect();
+          reverbSend.disconnect();
+          reverbNode.disconnect();
+          reverbOut.disconnect();
+        } catch {}
+      }
+    };
+  }
+
+  // === NUEVO: aplicar planes con applyAt/duration de forma musical y segura ===
+  public applyPlannedEffects(audioContext: AudioContext, fx: ReturnType<AIAudioProcessingService['buildFxRouter']>, plan: {
+    reverb: number,
+    delay: number,
+    delayTime: number,
+    feedback: number,
+    applyAt?: number,
+    duration?: number
+  }, bpm: number): void {
+    const spb = this.secondsPerBeat(bpm);
+    const dt = plan.delayTime || spb / 4;
+    fx.delay.delayTime.setValueAtTime(dt, audioContext.currentTime);
+
+    const start = plan.applyAt ?? audioContext.currentTime + 0.05;
+    const end = plan.duration ? start + plan.duration : undefined;
+
+    fx.setDelayWet(plan.delay, start, end);
+    fx.setDelayFeedback(plan.feedback, start);
+    fx.setReverbSend(plan.reverb, start, end);
   }
 }

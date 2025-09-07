@@ -15,6 +15,8 @@
 
 
 
+<canvas id="wave-bg-canvas" class="w-full h-[260px] block opacity-70"></canvas>
+
 @if (songs.length > 1){
 <app-song-carousel [songs]="songs"></app-song-carousel>
 
@@ -43,7 +45,32 @@
     </button>
   </div>
 
-  <!-- Professional DJ Features Info -->
+  <!-- DJ Controls Panel -->
+  <div class="px-4 py-3 rounded-md bg-[rgba(0,0,0,0.35)] backdrop-blur-md border border-white/10 mt-4">
+    <div class="text-sm font-semibold mb-2">Controles de DJ (FX en vivo)</div>
+    <div class="grid gap-3 md:grid-cols-3 items-center">
+      <div class="flex items-center gap-2">
+        <label for="fxIntensity" class="text-xs opacity-80 w-28">Intensidad FX</label>
+        <input id="fxIntensity" type="range" min="0" max="1" step="0.05" [(ngModel)]="fxIntensity" class="w-full" />
+        <span class="text-xs w-8 text-right">{{ fxIntensity | number:'1.0-2' }}</span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <label for="djMode" class="text-xs opacity-80 w-28">Modo DJ</label>
+        <select id="djMode" [(ngModel)]="djMode" class="bg-transparent border border-white/20 rounded px-2 py-1 text-sm">
+          <option value="suave">Suave</option>
+          <option value="medio">Medio</option>
+          <option value="intenso">Intenso</option>
+        </select>
+      </div>
+
+      <div class="flex flex-wrap gap-2">
+        <button class="px-3 py-1 rounded bg-white/10 hover:bg-white/20 text-xs" (click)="triggerFilterSweep(4, true)">Sweep Open (4)</button>
+        <button class="px-3 py-1 rounded bg-white/10 hover:bg-white/20 text-xs" (click)="triggerDelayFill(8, 2)">Delay Fill 1/8 (2)</button>
+        <button class="px-3 py-1 rounded bg-white/10 hover:bg-white/20 text-xs" (click)="triggerDropPunch()">Drop Punch</button>
+      </div>
+    </div>
+  </div>
 
 </div>
 <app-list-song [songs]="songs"></app-list-song>
