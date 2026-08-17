@@ -17,9 +17,17 @@
             <p class="text-xs text-gray-400 truncate">{{ song.artists }}</p>
             <div class="flex justify-between">
               <p class="text-xs text-gray-500">Duracion / {{ song.duration }}</p>
-              @if (song.bpm) {
-                <p class="text-xs text-green-500 font-semibold mr-2">{{ song.bpm }} BPM</p>
-              }
+              <div class="flex items-center gap-1.5 mr-2">
+                @if (song.camelot) {
+                  <p class="text-xs text-purple-400 font-semibold">{{ song.camelot }}</p>
+                }
+                @if (song.energy !== undefined) {
+                  <p class="text-xs text-amber-400 font-semibold">⚡{{ (song.energy! * 10) | number:'1.0-0' }}</p>
+                }
+                @if (song.bpm) {
+                  <p class="text-xs text-green-500 font-semibold">{{ song.bpm | number:'1.0-0' }} BPM</p>
+                }
+              </div>
             </div>
           </div>
         </div>

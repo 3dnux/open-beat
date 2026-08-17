@@ -1,9 +1,11 @@
 import { Component, Input } from '@angular/core';
+import { DecimalPipe } from '@angular/common';
 import { Song } from '../song-carousel/song-carousel';
 
 @Component({
   selector: 'app-list-song',
   imports: [
+    DecimalPipe
   ],
   templateUrl: './list-song.html',
   styleUrl: './list-song.scss'

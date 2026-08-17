@@ -6,13 +6,17 @@ Open Beat es una aplicación de DJ moderna e inteligente que utiliza tecnología
 
 ## Características
 
-- **Interfaz de DJ intuitiva**: Carrusel de canciones y artistas para una navegación fácil
-- **Análisis de audio con IA**: Procesamiento avanzado de audio utilizando TensorFlow.js y Magenta
-- **Detección automática de BPM**: Identifica automáticamente el tempo de las canciones
-- **Transiciones inteligentes**: Crea transiciones suaves entre canciones
+- **Auto-DJ profesional**: mezcla automática al estilo de los sistemas avanzados de DJ
+  - **Análisis musical completo** en un Web Worker (sin congelar la interfaz): BPM con precisión de centésimas, cuadrícula de beats y compases (beatgrid + downbeats), tonalidad musical por cromagrama (perfiles Krumhansl-Schmuckler → rueda de Camelot), curva de energía, estructura (intro/outro/drops) y loudness
+  - **Beatmatching real**: sincroniza el tempo del siguiente track con `playbackRate` (con master tempo, sin cambiar el tono) y un *phase-lock* continuo que micro-ajusta la fase de los beats durante la mezcla, como un DJ con el jog wheel
+  - **Mezcla armónica**: elige el siguiente track por compatibilidad de tonalidad (rueda de Camelot), tempo y energía
+  - **Transiciones planificadas**: blend largo de 16/32 beats alineado a frases cuando los tempos son compatibles, o corte con filtro + echo-out cuando no lo son; el punto de salida se alinea al inicio del outro detectado, sobre un downbeat
+  - **Bass swap**: intercambio de graves entre decks para que dos líneas de bajo nunca choquen
+  - **Auto-gain**: iguala el loudness percibido entre tracks automáticamente
+- **Interfaz de DJ intuitiva**: Carrusel de canciones y artistas, con BPM, tonalidad (Camelot) y energía de cada track
 - **Análisis emocional**: Analiza el contenido emocional de la música
-- **Gestión de metadatos**: Extrae y gestiona metadatos de archivos de música
-- **Visualización de carátulas**: Muestra las carátulas de los álbumes
+- **Gestión de metadatos**: Extrae y gestiona metadatos de archivos de música (tags ID3, carátulas embebidas)
+- **Biblioteca local**: lee la música de `src/assets/music` (ver el README de esa carpeta)
 
 ## Tecnologías utilizadas
 

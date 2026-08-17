@@ -14,8 +14,7 @@ import { FormsModule } from '@angular/forms';
 import { CommonModule } from '@angular/common';
 import * as jschardet from 'jschardet';
 import { DjEngineService } from '../services/dj-engine.service';
-import { BpmDetectionService } from '../services/bpm-detection.service';
-import { DjTransitionService } from '../services/dj-transition.service';
+import { TrackAnalysisService, TrackAnalysis } from '../services/track-analysis.service';
 import { MetadataService } from '../services/metadata.service';
 import { AIAudioProcessingService } from '../services/ai-audio-processing.service';
 import { HowlerAudioService } from '../services/howler-audio.service';
@@ -142,10 +141,24 @@ export class Home implements AfterViewInit, OnDestroy {
   // Sweepable high-pass filters used for the DJ-style "bass swap" during crossfades
   private currentBassCutNode: BiquadFilterNode | null = null;
   private nextBassCutNode: BiquadFilterNode | null = null;
+  // Sweepable low-pass filters (echo-out cuts, filter fades)
+  private currentHiCutNode: BiquadFilterNode | null = null;
+  private nextHiCutNode: BiquadFilterNode | null = null;
+  // Per-deck makeup gain for automatic loudness matching between tracks
+  private currentMakeupGain: GainNode | null = null;
+  private nextMakeupGain: GainNode | null = null;
 
-  // Crossfade (Beatport-style auto mix) state
+  // Crossfade / auto-mix engine state
   private crossfadeActive: boolean = false;
   private crossfadeRafId: number = 0;
+  // playbackRate of the playing deck (beatmatching); glides back to 1.0 after a mix
+  private currentDeckRate: number = 1;
+  private rateGlideTimer: any = null;
+  // Phrase-aligned time (in current-track seconds) where the next blend starts
+  private plannedMixOutAt: number | null = null;
+  // Whether the planned mix-out used the track analysis (if not, it is
+  // recomputed as soon as the analysis arrives)
+  private plannedMixOutUsedAnalysis: boolean = false;
 
   // Audio analyzer for frequency analysis
   private analyzer: AnalyserNode | null = null;
@@ -165,8 +178,6 @@ export class Home implements AfterViewInit, OnDestroy {
   private previousBassEnergy: number = 0;
   // NUEVO: referencia para detener FX “divertidos”
   private stopFunFxScheduler?: () => void;
-  // Analyzer worker instance
-  private djWorker?: Worker;
 
   // UI background animation controls and visibility handler
   private waveResizeHandler: (() => void) | null = null;
@@ -174,8 +185,7 @@ export class Home implements AfterViewInit, OnDestroy {
   private visibilityHandler: (() => void) | null = null;
 
   constructor(
-    private bpmDetectionService: BpmDetectionService,
-    private djTransitionService: DjTransitionService,
+    private trackAnalysisService: TrackAnalysisService,
     private metadataService: MetadataService,
     private aiAudioProcessingService: AIAudioProcessingService,
     private howlerAudioService: HowlerAudioService,
@@ -344,12 +354,19 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentAudioPlayer = null;
       this.nextAudioPlayer = null;
 
-      // Stop any crossfade in progress
+      // Stop any crossfade in progress and reset the auto-mix engine
       this.crossfadeActive = false;
       if (this.crossfadeRafId) {
         cancelAnimationFrame(this.crossfadeRafId);
         this.crossfadeRafId = 0;
       }
+      if (this.rateGlideTimer) {
+        clearInterval(this.rateGlideTimer);
+        this.rateGlideTimer = null;
+      }
+      this.currentDeckRate = 1;
+      this.plannedMixOutAt = null;
+      this.plannedMixOutUsedAnalysis = false;
 
       const nodes: (AudioNode | null)[] = [
         this.currentSourceNode, this.nextSourceNode, this.currentPannerNode, this.nextPannerNode,
@@ -357,6 +374,8 @@ export class Home implements AfterViewInit, OnDestroy {
         this.currentDelayNode, this.currentFeedbackGain, this.currentDelayMix, this.currentDryMix,
         this.nextDelayNode, this.nextFeedbackGain, this.nextDelayMix, this.nextDryMix,
         this.currentBassCutNode, this.nextBassCutNode,
+        this.currentHiCutNode, this.nextHiCutNode,
+        this.currentMakeupGain, this.nextMakeupGain,
         this.analyzer
       ];
       nodes.forEach(n => { try { n && n.disconnect(); } catch {} });
@@ -366,6 +385,8 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentDelayNode = this.currentFeedbackGain = this.currentDelayMix = this.currentDryMix = null;
       this.nextDelayNode = this.nextFeedbackGain = this.nextDelayMix = this.nextDryMix = null;
       this.currentBassCutNode = this.nextBassCutNode = null;
+      this.currentHiCutNode = this.nextHiCutNode = null;
+      this.currentMakeupGain = this.nextMakeupGain = null;
       this.analyzer = null;
     } catch (e) {
       console.warn('Error tearing down HTML Audio pipeline', e);
@@ -493,14 +514,14 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentAudioPlayer = new Audio(firstSong.songUrl);
       this.currentAudioPlayer.crossOrigin = 'anonymous';
       // Detect BPM when loading a new song
-      this.detectBpm(this.currentAudioPlayer, firstSong);
+      this.analyzeSong(firstSong);
     } else if (this.currentAudioPlayer.src !== firstSong.songUrl) {
       // If the current song has changed, create a new audio player
       this.currentAudioPlayer.pause();
       this.currentAudioPlayer = new Audio(firstSong.songUrl);
       this.currentAudioPlayer.crossOrigin = 'anonymous';
       // Detect BPM when loading a new song
-      this.detectBpm(this.currentAudioPlayer, firstSong);
+      this.analyzeSong(firstSong);
     }
 
     // Set up event listeners for current song (remove old ones first to avoid duplicates)
@@ -564,6 +585,11 @@ export class Home implements AfterViewInit, OnDestroy {
       this.setupSpatialAudio(this.currentAudioPlayer, true);
     }
 
+    // Pick the most compatible next track (harmonic mixing) before wiring it
+    this.selectBestNextTrack();
+    this.plannedMixOutAt = null;
+    this.plannedMixOutUsedAnalysis = false;
+
     // Initialize or update next audio player if there's a next song
     if (this.songs.length > 1) {
       const nextSong = this.songs[1];
@@ -572,14 +598,14 @@ export class Home implements AfterViewInit, OnDestroy {
         this.nextAudioPlayer = new Audio(nextSong.songUrl);
         this.nextAudioPlayer.crossOrigin = 'anonymous';
         // Detect BPM for next song
-        this.detectBpm(this.nextAudioPlayer, nextSong);
+        this.analyzeSong(nextSong);
       } else if (this.nextAudioPlayer.src !== nextSong.songUrl) {
         // If the next song has changed, create a new audio player
         this.nextAudioPlayer.pause();
         this.nextAudioPlayer = new Audio(nextSong.songUrl);
         this.nextAudioPlayer.crossOrigin = 'anonymous';
         // Detect BPM for next song
-        this.detectBpm(this.nextAudioPlayer, nextSong);
+        this.analyzeSong(nextSong);
       }
 
       this.nextAudioPlayer.volume = 0; // Start with volume at 0
@@ -732,6 +758,8 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentDelayMix = processingNodes.delayMix;
       this.currentDryMix = processingNodes.dryMix;
       this.currentBassCutNode = processingNodes.bassCut;
+      this.currentHiCutNode = processingNodes.hiCut;
+      this.currentMakeupGain = processingNodes.makeupGain;
     } else {
       this.nextSourceNode = sourceNode;
       this.nextPannerNode = pannerNode;
@@ -741,6 +769,8 @@ export class Home implements AfterViewInit, OnDestroy {
       this.nextDelayMix = processingNodes.delayMix;
       this.nextDryMix = processingNodes.dryMix;
       this.nextBassCutNode = processingNodes.bassCut;
+      this.nextHiCutNode = processingNodes.hiCut;
+      this.nextMakeupGain = processingNodes.makeupGain;
     }
     // NOTE: sources are intentionally NOT attached to DjEngineService here.
     // Its planTransition() connected the raw sources to a second, parallel
@@ -760,7 +790,9 @@ export class Home implements AfterViewInit, OnDestroy {
     feedbackGain: GainNode,
     delayMix: GainNode,
     dryMix: GainNode,
-    bassCut: BiquadFilterNode
+    bassCut: BiquadFilterNode,
+    hiCut: BiquadFilterNode,
+    makeupGain: GainNode
   } {
     if (!this.audioContext) {
       throw new Error('AudioContext not initialized');
@@ -775,6 +807,18 @@ export class Home implements AfterViewInit, OnDestroy {
     bassCut.type = 'highpass';
     bassCut.frequency.value = 20;
     bassCut.Q.value = 0.7;
+
+    // 0b. Sweepable low-pass for echo-out / filter-fade transitions.
+    // Neutral at 20 kHz; swept down to darken the outgoing deck.
+    const hiCut = this.audioContext.createBiquadFilter();
+    hiCut.type = 'lowpass';
+    hiCut.frequency.value = 20000;
+    hiCut.Q.value = 0.7;
+
+    // 0c. Per-deck makeup gain: the auto-mix engine sets this so every track
+    // plays at the same perceived loudness (automatic gain staging).
+    const makeupGain = this.audioContext.createGain();
+    makeupGain.gain.value = 1.0;
 
     // 1. Pre-gain to optimize input level
     const preGain = this.audioContext.createGain();
@@ -859,7 +903,8 @@ export class Home implements AfterViewInit, OnDestroy {
     feedbackGain.connect(delayNode);
 
     // Connect the enhanced processing chain
-    bassCut.connect(preGain);
+    bassCut.connect(hiCut);
+    hiCut.connect(preGain);
     preGain.connect(subBass);
     subBass.connect(bassBoost);
     bassBoost.connect(lowerMid);
@@ -882,16 +927,21 @@ export class Home implements AfterViewInit, OnDestroy {
     // Connect to compressor for final output
     finalMixer.connect(compressor);
 
+    // Final makeup gain for automatic loudness matching
+    compressor.connect(makeupGain);
+
     // Return the input and output nodes of the chain, plus delay control nodes
     return {
       input: bassCut, // Chain starts at the sweepable bass-cut filter
-      output: compressor,
+      output: makeupGain,
       // Add these properties to the returned object
       delayNode: delayNode,
       feedbackGain: feedbackGain,
       delayMix: delayMix,
       dryMix: dryMix,
-      bassCut: bassCut
+      bassCut: bassCut,
+      hiCut: hiCut,
+      makeupGain: makeupGain
     };
   }
 
@@ -1024,6 +1074,8 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentDelayMix = this.nextDelayMix;
       this.currentDryMix = this.nextDryMix;
       this.currentBassCutNode = this.nextBassCutNode;
+      this.currentHiCutNode = this.nextHiCutNode;
+      this.currentMakeupGain = this.nextMakeupGain;
 
       // Reset next nodes
       this.nextSourceNode = null;
@@ -1033,15 +1085,28 @@ export class Home implements AfterViewInit, OnDestroy {
       this.nextDelayMix = null;
       this.nextDryMix = null;
       this.nextBassCutNode = null;
+      this.nextHiCutNode = null;
+      this.nextMakeupGain = null;
 
-      // Make sure the promoted deck plays with its full low end restored
-      if (this.currentBassCutNode && this.audioContext) {
+      // Make sure the promoted deck plays with its full spectrum restored
+      if (this.audioContext) {
+        const now = this.audioContext.currentTime;
         try {
-          const now = this.audioContext.currentTime;
-          this.currentBassCutNode.frequency.cancelScheduledValues(now);
-          this.currentBassCutNode.frequency.setValueAtTime(20, now);
+          this.currentBassCutNode?.frequency.cancelScheduledValues(now);
+          this.currentBassCutNode?.frequency.setValueAtTime(20, now);
+        } catch {}
+        try {
+          this.currentHiCutNode?.frequency.cancelScheduledValues(now);
+          this.currentHiCutNode?.frequency.setValueAtTime(20000, now);
         } catch {}
       }
+
+      // The promoted deck may be tempo-shifted from beatmatching; glide it
+      // back to its native tempo, imperceptibly, like a pro DJ's tempo reset
+      this.currentDeckRate = this.currentAudioPlayer?.playbackRate || 1;
+      this.plannedMixOutAt = null;
+      this.plannedMixOutUsedAnalysis = false;
+      this.startRateGlide();
 
       // Reconnect analyzer to new current source if needed
       if (this.analyzer && this.currentSourceNode) {
@@ -1145,12 +1210,16 @@ export class Home implements AfterViewInit, OnDestroy {
         }
       }
 
+      // Pick the most compatible next track (harmonic mixing) before wiring it
+      this.selectBestNextTrack();
+
       // Create a new next audio player if there's another song
       if (this.songs.length > 1) {
         const newNextSong = this.songs[1];
         this.nextAudioPlayer = new Audio(newNextSong.songUrl);
         this.nextAudioPlayer.crossOrigin = 'anonymous';
         this.nextAudioPlayer.volume = 0;
+        this.analyzeSong(newNextSong);
 
         // Set up 3D audio for the new next song
         this.setupSpatialAudio(this.nextAudioPlayer, false);
@@ -1179,15 +1248,25 @@ export class Home implements AfterViewInit, OnDestroy {
     // Update progress percentage (0-100)
     firstSong.progress = (this.currentAudioPlayer.currentTime / this.currentAudioPlayer.duration) * 100;
 
-    // Check if we need to start the DJ transition (20-30 seconds before the end,
-    // depending on the track's BPM so the blend lasts a musical number of bars)
+    // Check if we need to start the DJ transition. The mix-out point is
+    // phrase-aligned: it lands on a downbeat where the track's outro begins
+    // (from the structure analysis), falling back to a BPM-scaled lead time.
     if (this.songs.length > 1 && this.nextAudioPlayer && !this.transitionStarted) {
       const totalDuration = this.currentAudioPlayer.duration;
       const remainingTime = totalDuration - this.currentAudioPlayer.currentTime;
-      const crossfadeLead = this.getCrossfadeLeadSeconds();
 
-      if (isFinite(remainingTime) && remainingTime <= crossfadeLead) {
-        console.log(`Starting DJ crossfade with ${remainingTime.toFixed(2)} seconds remaining (lead: ${crossfadeLead.toFixed(1)}s)`);
+      // (Re)compute the mix-out point: initially with the BPM fallback, and
+      // again once the track analysis arrives so outro/phrase alignment kicks in
+      const hasAnalysis = !!this.songs[0]?.analysis;
+      if ((this.plannedMixOutAt === null || (!this.plannedMixOutUsedAnalysis && hasAnalysis)) &&
+          isFinite(totalDuration) && totalDuration > 0) {
+        this.plannedMixOutAt = this.computeMixOutTime(totalDuration);
+        this.plannedMixOutUsedAnalysis = hasAnalysis;
+      }
+
+      if (isFinite(remainingTime) && this.plannedMixOutAt !== null &&
+          this.currentAudioPlayer.currentTime >= this.plannedMixOutAt) {
+        console.log(`Starting DJ crossfade at ${this.currentAudioPlayer.currentTime.toFixed(2)}s (planned mix-out: ${this.plannedMixOutAt.toFixed(2)}s, remaining: ${remainingTime.toFixed(2)}s)`);
         this.startDjTransition();
 
         // Set a flag to track if we've already set up a fallback for this transition attempt
@@ -1255,7 +1334,7 @@ export class Home implements AfterViewInit, OnDestroy {
       this.preloadedAudioPlayers[i] = preloadPlayer;
 
       // Detect BPM for preloaded song
-      this.detectBpm(preloadPlayer, songToPreload);
+      this.analyzeSong(songToPreload);
     }
   }
 
@@ -1302,7 +1381,7 @@ export class Home implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * How many seconds before the end of the current track the mix should start.
+   * Fallback lead time when no track analysis is available yet.
    * Uses the track's BPM so the blend covers a musical number of bars,
    * clamped to the 20-30s window; short tracks get a proportionally shorter fade.
    */
@@ -1321,10 +1400,186 @@ export class Home implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * Starts the automatic DJ crossfade: the next track begins playing silently
-   * and rises with an equal-power curve while the current one fades out.
-   * A "bass swap" (high-pass sweep) keeps the two basslines from clashing,
-   * and the outgoing deck gets a delay/echo tail, like a real DJ mix.
+   * Where the blend out of the current track should start, in current-track
+   * seconds. Prefers the analyzed outro start, snapped to a downbeat so the
+   * mix begins on a bar like a real DJ; falls back to the BPM-scaled lead.
+   */
+  private computeMixOutTime(duration: number): number {
+    const a = this.songs[0]?.analysis;
+    let start = duration - this.getCrossfadeLeadSeconds();
+
+    if (a && a.outroStart > 0 && isFinite(a.outroStart)) {
+      // Blend where the outro begins, within sensible bounds
+      start = Math.min(Math.max(a.outroStart, duration - 45), duration - 10);
+    }
+
+    // Snap to the bar grid so the blend starts on a downbeat
+    if (a && a.barDuration > 0) {
+      const k = Math.round((start - a.downbeatOffset) / a.barDuration);
+      const snapped = a.downbeatOffset + k * a.barDuration;
+      if (isFinite(snapped) && snapped > 4 && snapped < duration - 4) {
+        start = snapped;
+      }
+    }
+    return Math.max(1, start);
+  }
+
+  /**
+   * Reorders the queue so the most compatible track (tempo, harmony, energy)
+   * is next - the same logic rekordbox/djay use for automatic track selection.
+   */
+  private selectBestNextTrack(): void {
+    if (this.transitionStarted || this.crossfadeActive) return;
+    if (this.songs.length <= 2) return;
+
+    const cur = this.songs[0];
+    let bestIdx = 1;
+    let bestScore = -1;
+    for (let i = 1; i < this.songs.length; i++) {
+      const score = this.compatibilityScore(cur, this.songs[i]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx !== 1) {
+      const [pick] = this.songs.splice(bestIdx, 1);
+      this.songs.splice(1, 0, pick);
+      console.log(`Auto-DJ picked "${pick.title}" as next track (compatibility ${(bestScore * 100).toFixed(0)}%)`);
+    }
+  }
+
+  /**
+   * 0-1 mix compatibility between two tracks: tempo proximity (with
+   * half/double-time folding), Camelot-wheel harmony, and energy continuity.
+   */
+  private compatibilityScore(a: Song, b: Song): number {
+    // Tempo
+    const bpmA = (a.analysis?.bpm || a.bpm || 0) * (this.currentDeckRate || 1);
+    const bpmB = b.analysis?.bpm || b.bpm || 0;
+    let tempoScore = 0.5;
+    if (bpmA > 0 && bpmB > 0) {
+      let t = bpmB;
+      if (bpmA / t > 1.5) t *= 2;
+      else if (bpmA / t < 0.67) t /= 2;
+      const dev = Math.abs(bpmA / t - 1);
+      tempoScore = Math.max(0, 1 - dev / 0.16);
+    }
+
+    // Harmony (Camelot wheel)
+    const keyScore = this.camelotScore(a.camelot, b.camelot);
+
+    // Energy: favor a gentle build over big jumps or drops
+    let energyScore = 0.5;
+    if (a.energy !== undefined && b.energy !== undefined) {
+      const delta = b.energy - a.energy;
+      energyScore = Math.max(0, 1 - Math.abs(delta - 0.05) / 0.5);
+    }
+
+    return tempoScore * 0.5 + keyScore * 0.3 + energyScore * 0.2;
+  }
+
+  /** Harmonic compatibility on the Camelot wheel (1.0 = perfect). */
+  private camelotScore(a?: string, b?: string): number {
+    if (!a || !b) return 0.5;
+    const numA = parseInt(a, 10);
+    const numB = parseInt(b, 10);
+    if (!numA || !numB) return 0.5;
+    const letA = a.slice(-1);
+    const letB = b.slice(-1);
+    let d = Math.abs(numA - numB);
+    d = Math.min(d, 12 - d); // the wheel wraps around
+    if (d === 0) return letA === letB ? 1 : 0.9; // same key / relative major-minor
+    if (d === 1 && letA === letB) return 0.85;   // adjacent on the wheel
+    if (d === 2 && letA === letB) return 0.45;   // "energy jump"
+    if (d === 1) return 0.4;
+    return 0.15;
+  }
+
+  /**
+   * Decides how to mix into the next track, from both tracks' analyses:
+   *  - 'beatmatch': tempos within 8% -> tempo-sync the incoming deck and
+   *    phase-lock it during a long 16/32-beat blend (like SYNC on a CDJ).
+   *  - 'blend': moderately different tempos -> plain equal-power blend.
+   *  - 'echo-cut': incompatible tempos -> short filter-down + echo-out cut.
+   */
+  private buildTransitionPlan(current: HTMLAudioElement): {
+    type: 'beatmatch' | 'blend' | 'echo-cut';
+    fadeDuration: number;
+    playbackRate: number;
+    nextStartAt: number;
+    makeupGainNext: number;
+    curA?: TrackAnalysis;
+    nextA?: TrackAnalysis;
+  } {
+    const curSong = this.songs[0];
+    const nextSong = this.songs[1];
+    const curA = curSong?.analysis;
+    const nextA = nextSong?.analysis;
+    const duration = current.duration || 0;
+    const remaining = Math.max(1, duration - current.currentTime);
+
+    // Auto-gain: keep perceived loudness constant across the whole set.
+    // The outgoing deck's own makeup gain is folded in so the anchor never drifts.
+    let makeupGainNext = 1;
+    if (curA?.loudness && nextA?.loudness) {
+      const curMakeup = this.currentMakeupGain?.gain?.value ?? 1;
+      makeupGainNext = Math.max(0.5, Math.min(1.8, (curA.loudness * curMakeup) / nextA.loudness));
+    }
+
+    // The incoming track starts on its first energetic downbeat (mix-in point)
+    let nextStartAt = 0;
+    if (nextA && nextA.mixInPoint > 0 && isFinite(nextA.mixInPoint) &&
+        nextA.mixInPoint < (nextA.duration || Infinity) * 0.5) {
+      nextStartAt = nextA.mixInPoint;
+    }
+
+    // Tempo compatibility (with half/double-time folding)
+    const curBpmBase = curA?.bpm || curSong?.bpm || 0;
+    const nextBpm = nextA?.bpm || nextSong?.bpm || 0;
+    const curEffBpm = curBpmBase * (this.currentDeckRate || 1);
+    let type: 'beatmatch' | 'blend' | 'echo-cut' = 'blend';
+    let playbackRate = 1;
+
+    if (curEffBpm > 0 && nextBpm > 0) {
+      let target = nextBpm;
+      if (curEffBpm / target > 1.5) target *= 2;
+      else if (curEffBpm / target < 0.67) target /= 2;
+      const rate = curEffBpm / target;
+      const haveGrids = !!(curA && nextA && curA.beatInterval > 0 && nextA.beatInterval > 0);
+
+      if (haveGrids && rate >= 0.92 && rate <= 1.08) {
+        type = 'beatmatch';
+        playbackRate = rate;
+      } else if (rate >= 0.84 && rate <= 1.19) {
+        type = 'blend';
+      } else {
+        type = 'echo-cut';
+      }
+    }
+
+    // Blend length: a musical number of beats, capped by the remaining time
+    let fadeDuration: number;
+    if (type === 'beatmatch' && curA) {
+      const wallBeat = curA.beatInterval / (this.currentDeckRate || 1);
+      const beats = (curA.energy > 0.55 && (nextA?.energy ?? 0) > 0.55) ? 32 : 16;
+      fadeDuration = beats * wallBeat;
+    } else if (type === 'blend') {
+      fadeDuration = this.getCrossfadeLeadSeconds();
+    } else {
+      fadeDuration = 8;
+    }
+    fadeDuration = Math.max(1, Math.min(remaining - 0.3, fadeDuration));
+
+    return { type, fadeDuration, playbackRate, nextStartAt, makeupGainNext, curA, nextA };
+  }
+
+  /**
+   * Starts the automatic DJ transition. The next track begins on its mix-in
+   * downbeat, tempo-synced when possible, rises with an equal-power curve
+   * while the current one fades out, with automatic gain staging, a bass
+   * swap (or filter/echo cut), and a beat phase-lock that micro-nudges the
+   * incoming deck exactly like a DJ riding the jog wheel.
    */
   private startCrossfade(): void {
     if (this.crossfadeActive) return;
@@ -1342,17 +1597,46 @@ export class Home implements AfterViewInit, OnDestroy {
     // Preload upcoming songs so future transitions have no loading gap
     this.preloadUpcomingSongs();
 
-    const remaining = Math.max(0, duration - current.currentTime);
-    const fadeDuration = Math.max(1, Math.min(remaining, this.getCrossfadeLeadSeconds()));
-    const fadeStart = duration - fadeDuration; // in current-track time
+    const plan = this.buildTransitionPlan(current);
+    const fadeDuration = plan.fadeDuration;
+    const fadeStart = current.currentTime;
 
-    console.log(`Crossfade started: ${fadeDuration.toFixed(1)}s blend into "${this.songs[1]?.title}"`);
+    console.log(
+      `Crossfade [${plan.type}] ${fadeDuration.toFixed(1)}s into "${this.songs[1]?.title}"` +
+      (plan.type === 'beatmatch' ? `, sync rate ${plan.playbackRate.toFixed(4)}` : '') +
+      `, gain ${plan.makeupGainNext.toFixed(2)}, next from ${plan.nextStartAt.toFixed(1)}s`
+    );
 
-    // Make sure the incoming track is ready and start it silently
+    // Prepare the incoming deck
     if (next.readyState < 3) { // HAVE_FUTURE_DATA
       try { next.load(); } catch {}
     }
+    try { (next as any).preservesPitch = true; } catch {} // master-tempo style: sync without chipmunking
     next.volume = 0;
+    try { next.playbackRate = plan.playbackRate; } catch {}
+    if (plan.nextStartAt > 0) {
+      if (next.readyState >= 1) { // HAVE_METADATA - seekable now
+        try { next.currentTime = plan.nextStartAt; } catch {}
+      } else {
+        // Seek to the mix-in point as soon as metadata arrives (if the blend
+        // just started; later than ~1s in, jumping would be audible)
+        const seekOnce = () => {
+          next.removeEventListener('loadedmetadata', seekOnce);
+          if (this.crossfadeActive && this.nextAudioPlayer === next && next.currentTime < 1) {
+            try { next.currentTime = plan.nextStartAt; } catch {}
+          }
+        };
+        next.addEventListener('loadedmetadata', seekOnce);
+      }
+    }
+
+    // Auto-gain: the incoming track lands at the same perceived loudness
+    if (this.nextMakeupGain && this.audioContext) {
+      try {
+        this.nextMakeupGain.gain.setTargetAtTime(plan.makeupGainNext, this.audioContext.currentTime, 0.4);
+      } catch {}
+    }
+
     const playPromise = next.play();
     if (playPromise !== undefined) {
       playPromise.catch(error => {
@@ -1361,9 +1645,10 @@ export class Home implements AfterViewInit, OnDestroy {
       });
     }
 
-    // Classic DJ bass swap via Web Audio (when the audio graph is available)
-    this.scheduleBassSwap(fadeDuration);
+    // Transition FX (bass swap / filter sweep / echo tail) per plan type
+    this.scheduleTransitionFx(plan);
 
+    let lastSyncAt = -1;
     const tick = () => {
       if (!this.crossfadeActive) return;
       // Stop if the decks were swapped elsewhere (e.g. fallback moveToNextSong)
@@ -1392,16 +1677,64 @@ export class Home implements AfterViewInit, OnDestroy {
       current.volume = Math.max(0, Math.min(1, Math.cos(progress * Math.PI / 2)));
       next.volume = Math.max(0, Math.min(1, Math.sin(progress * Math.PI / 2)));
 
+      // Beat phase-lock (PLL): measure the beat-phase error between decks and
+      // micro-nudge the incoming deck's rate, like a DJ touching the jog wheel
+      if (plan.type === 'beatmatch' && plan.curA && plan.nextA &&
+          current.currentTime - lastSyncAt >= 0.25) {
+        lastSyncAt = current.currentTime;
+        const fbCur = (current.currentTime - plan.curA.beatOffset) / plan.curA.beatInterval;
+        const fbNext = (next.currentTime - plan.nextA.beatOffset) / plan.nextA.beatInterval;
+        let err = (fbCur - fbNext) % 1;
+        if (err > 0.5) err -= 1;
+        else if (err < -0.5) err += 1;
+        const nudge = Math.max(-0.02, Math.min(0.02, err * 0.08));
+        try { next.playbackRate = plan.playbackRate * (1 + nudge); } catch {}
+      }
+
       // Delay/echo tail on the outgoing deck as it fades
       try { this.adjustDelayEffect(remainingNow); } catch {}
 
       if (current.ended || remainingNow <= 0.25 || progress >= 1) {
-        this.finishCrossfade(current, next);
+        this.finishCrossfade(current, next, plan.playbackRate);
         return;
       }
       this.crossfadeRafId = requestAnimationFrame(tick);
     };
     this.crossfadeRafId = requestAnimationFrame(tick);
+  }
+
+  /**
+   * Schedules the audible "DJ hands" of the transition:
+   *  - blends: bass swap so the two basslines never clash, plus a subtle
+   *    tempo-synced delay tail;
+   *  - echo-cut: low-pass sweep down + generous echo on the outgoing deck.
+   */
+  private scheduleTransitionFx(plan: { type: string; fadeDuration: number; curA?: TrackAnalysis }): void {
+    if (!this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    const dur = plan.fadeDuration;
+    const bpm = (plan.curA?.bpm || this.songs[0]?.bpm || 126) * (this.currentDeckRate || 1);
+
+    try { this.fxRouter?.setDelayTempo(bpm, 4); } catch {}
+
+    try {
+      if (plan.type === 'echo-cut') {
+        if (this.currentHiCutNode) {
+          const f = this.currentHiCutNode.frequency;
+          f.cancelScheduledValues(now);
+          f.setValueAtTime(20000, now);
+          f.exponentialRampToValueAtTime(380, now + dur * 0.95);
+        }
+        this.fxRouter?.setDelayWet(0.35, now + dur * 0.4, now + dur + 3);
+        this.fxRouter?.setDelayFeedback(0.45, now + dur * 0.4);
+      } else {
+        this.scheduleBassSwap(dur);
+        this.fxRouter?.setDelayWet(0.18, now + dur * 0.7, now + dur + 2);
+        this.fxRouter?.setDelayFeedback(0.3, now + dur * 0.7);
+      }
+    } catch (e) {
+      console.warn('Transition FX scheduling failed:', e);
+    }
   }
 
   /**
@@ -1436,7 +1769,7 @@ export class Home implements AfterViewInit, OnDestroy {
    * Ends the crossfade: silences and detaches the outgoing deck and promotes
    * the incoming one via moveToNextSong().
    */
-  private finishCrossfade(current: HTMLAudioElement, next: HTMLAudioElement): void {
+  private finishCrossfade(current: HTMLAudioElement, next: HTMLAudioElement, finalRate: number = 1): void {
     if (!this.crossfadeActive) return;
     this.crossfadeActive = false;
     if (this.crossfadeRafId) cancelAnimationFrame(this.crossfadeRafId);
@@ -1452,9 +1785,45 @@ export class Home implements AfterViewInit, OnDestroy {
     try { current.pause(); } catch {}
     current.volume = 0;
     next.volume = 1;
+    // Drop any phase-lock nudge residue; keep the clean sync rate for the glide
+    try { next.playbackRate = finalRate; } catch {}
 
     console.log('Crossfade complete, promoting next track');
     this.moveToNextSong();
+  }
+
+  /**
+   * After a beatmatched mix the promoted deck may play up to 8% off its
+   * native tempo. Glide it back to 1.0 in imperceptible steps (a pro DJ's
+   * slow tempo reset) so the next transition starts from natural speed.
+   */
+  private startRateGlide(): void {
+    if (this.rateGlideTimer) {
+      clearInterval(this.rateGlideTimer);
+      this.rateGlideTimer = null;
+    }
+    if (Math.abs(this.currentDeckRate - 1) < 0.003) {
+      this.currentDeckRate = 1;
+      this.applyCurrentDeckRate();
+      return;
+    }
+    this.rateGlideTimer = setInterval(() => {
+      // Hold tempo while a new blend is running
+      if (this.crossfadeActive) return;
+      this.currentDeckRate += (1 - this.currentDeckRate) * 0.08;
+      if (Math.abs(this.currentDeckRate - 1) < 0.003) {
+        this.currentDeckRate = 1;
+        clearInterval(this.rateGlideTimer);
+        this.rateGlideTimer = null;
+      }
+      this.applyCurrentDeckRate();
+    }, 500);
+  }
+
+  private applyCurrentDeckRate(): void {
+    if (this.currentAudioPlayer) {
+      try { this.currentAudioPlayer.playbackRate = this.currentDeckRate; } catch {}
+    }
   }
 
   /**
@@ -2659,127 +3028,38 @@ this.audioContext?.currentTime || 0
   }
 
   /**
-   * Detects the BPM of a song using the BPM detection service
-   * @param audioElement The audio element containing the song
-   * @param song The song object to update with BPM information
+   * Runs the full DJ analysis for a song (BPM + beatgrid, musical key,
+   * energy, structure, loudness) off the main thread and stores the result
+   * on the Song object. Replaces the old MediaRecorder-based BPM detection.
    */
-  private detectBpm(audioElement: HTMLAudioElement, song: Song): void {
-    if (!this.audioContext) return;
-
-    console.log(`Detecting BPM for "${song.title}" by ${song.artists}...`);
-
-    // Create a temporary buffer to analyze
-    const tempAudio = new Audio(song.songUrl);
-    tempAudio.crossOrigin = 'anonymous';
-
-    // Update song duration when metadata is loaded
-    tempAudio.addEventListener('loadedmetadata', () => {
-      if (tempAudio.duration && !isNaN(tempAudio.duration) && isFinite(tempAudio.duration)) {
-        // Calculate duration in minutes and seconds
-        const totalSeconds = Math.floor(tempAudio.duration);
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-
-        // Update song duration properties
-        song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-        song.durationSeconds = totalSeconds;
-
-        console.log(`Updated duration for "${song.title}": ${song.duration} (${totalSeconds}s)`);
-      }
-    });
-
-    // Create a temporary source node and connect it to a MediaRecorder
-    const tempContext = new AudioContext();
-    const tempSource = tempContext.createMediaElementSource(tempAudio);
-    const tempDestination = tempContext.createMediaStreamDestination();
-    tempSource.connect(tempDestination);
-
-    // Create a buffer to store audio data
-    let audioChunks: Blob[] = [];
-    let mediaRecorder: MediaRecorder;
-    try {
-      mediaRecorder = new MediaRecorder(tempDestination.stream);
-    } catch (error: any) {
-      console.error('Error creating MediaRecorder:', error);
-      return;
-    }
-
-    mediaRecorder.ondataavailable = (event: BlobEvent) => {
-      if (event.data.size > 0) {
-        audioChunks.push(event.data);
-      }
-    };
-
-    mediaRecorder.onstop = async () => {
-      // Create a blob from the recorded chunks
-      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-
-      // Convert blob to ArrayBuffer
-      const arrayBuffer = await audioBlob.arrayBuffer();
-
-      try {
-        // Decode the audio data
-        const audioBuffer = await this.audioContext!.decodeAudioData(arrayBuffer);
-
-        // Detect BPM using our service
-        const bpm = await this.bpmDetectionService.detectBpm(audioBuffer);
-
-        // Update the song with the detected BPM
-        song.bpm = bpm;
-        console.log(`Detected BPM for "${song.title}": ${bpm}`);
-
-        // Kick off analyzer worker for richer metadata (beatgrid, key, structure)
-        try {
-          if (typeof Worker !== 'undefined') {
-            if (!this.djWorker) {
-              // Use bundler-friendly URL for Angular
-              this.djWorker = new Worker(new URL('../workers/dj-analyzer.worker', import.meta.url), { type: 'module' });
-            }
-            const pcmData = audioBuffer.getChannelData(0);
-            const pcm = new Float32Array(pcmData.length);
-            pcm.set(pcmData);
-            const songId = song.songUrl;
-            this.djWorker.onmessage = (ev: MessageEvent) => {
-              const msg: any = ev.data;
-              if (!msg || !msg.ok || !msg.result) return;
-              if (msg.id !== songId) return;
-              const { bpm: analyzedBpm, beatgrid, key, structure } = msg.result;
-              if (analyzedBpm && !isNaN(analyzedBpm)) {
-                // Optionally trust worker BPM if reasonable
-                song.bpm = song.bpm || analyzedBpm;
-              }
-              (song as any).beatgrid = beatgrid;
-              (song as any).keyCamelot = key;
-              (song as any).structure = structure;
-            };
-            this.djWorker.postMessage({ type: 'analyze', pcm, sampleRate: this.audioContext!.sampleRate, id: songId }, [pcm.buffer]);
-          }
-        } catch (err) {
-          console.warn('Analyzer worker failed:', err);
+  private analyzeSong(song: Song): void {
+    if (!song.songUrl || song.analysis) return;
+    this.trackAnalysisService.analyze(song.songUrl)
+      .then(analysis => {
+        song.analysis = analysis;
+        if (analysis.bpm > 0) song.bpm = Math.round(analysis.bpm * 10) / 10;
+        if (analysis.camelot) {
+          song.camelot = analysis.camelot;
+          song.keyName = analysis.keyName;
         }
-
-        // Clean up
-        tempContext.close();
-      } catch (error: any) {
-        console.error('Error detecting BPM:', error);
-        // Set a default BPM if detection fails
-        song.bpm = 128;
-      }
-    };
-
-    // Start recording
-    mediaRecorder.start();
-
-    // Play a short segment of the audio (first 30 seconds is usually enough for BPM detection)
-    tempAudio.play();
-
-    // Stop after 30 seconds or when the audio ends
-    const stopTime = Math.min(30, tempAudio.duration || 30);
-    setTimeout(() => {
-      tempAudio.pause();
-      mediaRecorder.stop();
-      tempAudio.src = '';
-    }, stopTime * 1000);
+        song.energy = Math.round(analysis.energy * 100) / 100;
+        if (!song.durationSeconds && isFinite(analysis.duration) && analysis.duration > 0) {
+          const totalSeconds = Math.floor(analysis.duration);
+          const minutes = Math.floor(totalSeconds / 60);
+          const seconds = totalSeconds % 60;
+          song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+          song.durationSeconds = totalSeconds;
+        }
+        console.log(
+          `DJ analysis "${song.title}": ${song.bpm} BPM, key ${analysis.camelot || '?'} ` +
+          `(${analysis.keyName || '?'}), energy ${(analysis.energy * 100).toFixed(0)}%, ` +
+          `outro @${analysis.outroStart.toFixed(1)}s, mix-in @${analysis.mixInPoint.toFixed(1)}s`
+        );
+      })
+      .catch(err => {
+        console.warn(`Track analysis failed for "${song.title}":`, err);
+        if (!song.bpm) song.bpm = 128;
+      });
   }
 
   /**
@@ -3120,6 +3400,7 @@ this.audioContext?.currentTime || 0
     // Clear intervals
     try { if (this.updateInterval) { clearInterval(this.updateInterval); this.updateInterval = null; } } catch {}
     try { if (this.aiAnalysisInterval) { clearInterval(this.aiAnalysisInterval); this.aiAnalysisInterval = null; } } catch {}
+    try { if (this.rateGlideTimer) { clearInterval(this.rateGlideTimer); this.rateGlideTimer = null; } } catch {}
 
     // Detach audio element listeners and pause
     try { if (this.currentAudioPlayer && this.updateProgressListener) this.currentAudioPlayer.removeEventListener('timeupdate', this.updateProgressListener); } catch {}
@@ -3152,7 +3433,6 @@ this.audioContext?.currentTime || 0
     try { this.autoDj.stop(); } catch {}
 
     // Terminate analyzer worker
-    try { this.djWorker?.terminate(); this.djWorker = undefined; } catch {}
 
     // Close/suspend our AudioContext
     try {

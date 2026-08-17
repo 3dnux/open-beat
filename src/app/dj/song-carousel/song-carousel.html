@@ -24,9 +24,17 @@
             }
             <div class="flex justify-between">
               <p class="text-xs text-gray-500">{{ songs[0].currentTime }} / {{ songs[0].duration }}</p>
-              @if (songs[0].bpm) {
-                <p class="text-xs text-green-500 font-semibold">{{ songs[0].bpm }} BPM</p>
-              }
+              <div class="flex items-center gap-1.5">
+                @if (songs[0].camelot) {
+                  <p class="text-xs text-purple-400 font-semibold">{{ songs[0].camelot }}</p>
+                }
+                @if (songs[0].energy !== undefined) {
+                  <p class="text-xs text-amber-400 font-semibold">⚡{{ (songs[0].energy! * 10) | number:'1.0-0' }}</p>
+                }
+                @if (songs[0].bpm) {
+                  <p class="text-xs text-green-500 font-semibold">{{ songs[0].bpm | number:'1.0-0' }} BPM</p>
+                }
+              </div>
             </div>
           </div>
           <!-- Waveform -->
