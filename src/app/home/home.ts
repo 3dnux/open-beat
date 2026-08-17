@@ -3038,7 +3038,9 @@ this.audioContext?.currentTime || 0
       .then(analysis => {
         song.analysis = analysis;
         if (analysis.bpm > 0) song.bpm = Math.round(analysis.bpm * 10) / 10;
-        if (analysis.camelot) {
+        // Only claim a key when the chroma correlation is decisive enough;
+        // a low-confidence guess would mislead the harmonic selection
+        if (analysis.camelot && analysis.keyConfidence >= 0.05) {
           song.camelot = analysis.camelot;
           song.keyName = analysis.keyName;
         }

@@ -117,15 +117,32 @@ function rmsRange(pcm: Float32Array, start: number, end: number): number {
 function analyzeEnergy(pcm: Float32Array, sr: number, duration: number) {
   const win = Math.floor(sr * 0.5); // 0.5s windows
   const nWin = Math.max(1, Math.floor(pcm.length / win));
-  const curve: number[] = new Array(nWin);
+  const curve: number[] = new Array(nWin);      // broadband RMS (loudness)
+  const brightness: number[] = new Array(nWin); // first-difference RMS (mid/high content)
   for (let i = 0; i < nWin; i++) {
-    curve[i] = rmsRange(pcm, i * win, (i + 1) * win);
+    const s = i * win;
+    const e = Math.min(pcm.length, s + win);
+    let sum = 0;
+    let dsum = 0;
+    for (let j = s; j < e; j++) {
+      sum += pcm[j] * pcm[j];
+      const d = pcm[j] - (j > 0 ? pcm[j - 1] : 0);
+      dsum += d * d;
+    }
+    const len = Math.max(1, e - s);
+    curve[i] = Math.sqrt(sum / len);
+    brightness[i] = Math.sqrt(dsum / len);
   }
 
-  const sorted = [...curve].sort((a, b) => a - b);
-  const ref = Math.max(1e-6, percentile(sorted, 0.95));
-  const norm = curve.map(v => Math.min(1, v / ref));
+  // Structure segmentation uses BRIGHTNESS, not broadband RMS: in EDM outros
+  // the kick keeps the RMS high while synths/vocals drop out, so mid/high
+  // content is a far better section indicator.
+  const sortedB = [...brightness].sort((a, b) => a - b);
+  const refB = Math.max(1e-6, percentile(sortedB, 0.95));
+  const norm = brightness.map(v => Math.min(1, v / refB));
   const smooth = movingAverage(norm, 8); // ~4s smoothing
+
+  const sorted = [...curve].sort((a, b) => a - b);
 
   // Loudness: representative RMS of the body of the track (auto-gain reference)
   const loStart = Math.floor(nWin * 0.2);
@@ -331,7 +348,9 @@ function analyzeKey(pcm: Float32Array, sr: number, duration: number) {
   const re = new Float32Array(N);
   const im = new Float32Array(N);
   const binHz = sr / N;
-  const minBin = Math.max(1, Math.ceil(55 / binHz));
+  // Start above the kick-drum fundamental range (tuned kicks around 40-100 Hz
+  // would otherwise bias the chroma toward the kick's pitch class)
+  const minBin = Math.max(1, Math.ceil(110 / binHz));
   const maxBin = Math.min(N / 2 - 1, Math.floor(4200 / binHz));
 
   // Precompute bin -> pitch-class map
