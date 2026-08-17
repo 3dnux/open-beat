@@ -250,7 +250,7 @@ export class MetadataService {
     const filename = decodedUrl.split('/').pop() || '';
 
     // Remove .mp3 extension
-    const nameWithoutExt = filename.replace('.mp3', '');
+    const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
 
     let title = 'Unknown Title';
     let artist = 'Unknown Artist';

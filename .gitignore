@@ -8,6 +8,9 @@
 # Angular cache
 /.angular
 
+# Generated at build/serve time by scripts/generate-music-manifest.js
+/src/assets/music/manifest.json
+
 # IDE / editor
 /.idea
 /.vscode

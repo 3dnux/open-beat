@@ -13,7 +13,6 @@ import {ListSong} from '../dj/list-song/list-song';
 import { FormsModule } from '@angular/forms';
 import { CommonModule } from '@angular/common';
 import * as jschardet from 'jschardet';
-import { AlbumArtService } from '../services/album-art.service';
 import { DjEngineService } from '../services/dj-engine.service';
 import { BpmDetectionService } from '../services/bpm-detection.service';
 import { DjTransitionService } from '../services/dj-transition.service';
@@ -49,146 +48,42 @@ export interface playlists {
 export class Home implements AfterViewInit, OnDestroy {
 
 
-  playlistsApp: playlists[] = [
-    {
-      name: 'Tiësto Set #029',
-      artist: 'Tiesto',
-      img: 'https://geo-media.beatport.com/image_size/590x404/846683c6-4b4d-44db-8ebe-13d5d3cd5f92.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/Adagio%20For%20Strings.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/C\'mon%20(Original%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Coming%20Home%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Dawnbreaker%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Drifting%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Grapevine%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Light%20Years%20Away%20(Extended%20Radio%20Edit).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Lose%20Control%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Meet%20Her%20(Ti%C3%ABsto%20vs.%20Da%20Hool%20-%20Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/My%20Whistle%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Party%20Time%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Pulverturm%20(Ti%C3%ABsto\'s%20Big%20Room%20Extended%20Remix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Red%20Lights%20(Extended%20Version).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/The%20Hypno.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/WOW%20(Extended%20Mix).mp3'
+  playlistsApp: playlists[] = [];
+
+  // Local placeholder cover (no external image/API calls)
+  private readonly localCoverUrl = 'assets/covers/vinyl.svg';
+
+  /**
+   * Loads the local music library from src/assets/music.
+   * The manifest.json file is generated automatically before `npm start` /
+   * `npm run build` by scripts/generate-music-manifest.js, since a browser
+   * cannot list a directory on its own.
+   */
+  private loadLocalMusic(): void {
+    fetch('assets/music/manifest.json')
+      .then(res => (res.ok ? res.json() : { tracks: [] }))
+      .then((manifest: { tracks?: string[] }) => {
+        const tracks = manifest?.tracks || [];
+        if (!tracks.length) {
+          console.warn('No songs found in src/assets/music (empty manifest). Run "npm run music:scan" after adding files.');
+          return;
         }
-      ]
-    },
-    {
-      name: 'Deorro Set #001',
-      artist: 'Deorro',
-      img: 'https://geo-media.beatport.com/image_size/590x404/651dd449-1d01-4a84-b352-c3a5caecb7fe.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Five More Hours - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Flashlight - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Freak (feat. Steve Bays) - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Me Caes Muy Bien - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Perdoname - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Savage - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Yee - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Yo Las Pongo - Original Mix.mp3'
-        }
-      ]
-    },
-    {
-      name: 'Purple Disco Machine Set #004',
-      artist:'Purple Disco Machine',
-      img: 'https://geo-media.beatport.com/image_size/590x404/7425b20c-6134-428c-b006-b0572f07a75f.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/purple/About Damn Time - Purple Disco Machine Extended Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/All My Life - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/At Night - Purple Disco Machine Extended Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Body Funk - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Coma Cat - Purple Disco Machine Extended Re-Work.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Dished (Male Stripper) - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Don\'t You Want Me - Purple Disco Machine Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Drop The Pressure - Purple Disco Machine Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Emotion - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Get Up 24 - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Heartbreaker - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/In My Arms - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/link-ref-Groovejet.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/On My Mind - Purple Disco Machine Remix (Extended).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Substitution - Extended.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/YoYo Disco - Purple Disco Machine Extended Remix.mp3'
-        }
-      ]
-    }
-  ];
+        const songs: songUpload[] = tracks.map(track => ({
+          // Encode each path segment so spaces and special characters in
+          // filenames produce valid URLs
+          url: 'assets/music/' + track.split('/').map(encodeURIComponent).join('/')
+        }));
+        this.playlistsApp = [
+          {
+            name: 'Mi Musica',
+            artist: 'Biblioteca local',
+            img: this.localCoverUrl,
+            songs
+          }
+        ];
+      })
+      .catch(err => console.error('Error loading local music manifest:', err));
+  }
 
 
 
@@ -279,7 +174,6 @@ export class Home implements AfterViewInit, OnDestroy {
   private visibilityHandler: (() => void) | null = null;
 
   constructor(
-    private albumArtService: AlbumArtService,
     private bpmDetectionService: BpmDetectionService,
     private djTransitionService: DjTransitionService,
     private metadataService: MetadataService,
@@ -289,7 +183,7 @@ export class Home implements AfterViewInit, OnDestroy {
     private djEngine: DjEngineService,
     private autoDj: AutoDjService
   ) {
-    this.populateSongsFromUrls();
+    this.loadLocalMusic();
 
     // Audio engine will be initialized on first user gesture (Play)
   }
@@ -1020,7 +914,7 @@ export class Home implements AfterViewInit, OnDestroy {
           composer: '',
           duration: '--:--',
           currentTime: '0:00',
-          coverUrl: 'https://dj.beatport.com/picx/vinyl_default2.png',
+          coverUrl: this.localCoverUrl,
           waveformData: Array(100).fill(0).map(() => Math.floor(Math.random() * 100)),
           songUrl: randomSongUpload.url,
           isPlaying: false,
@@ -2451,7 +2345,7 @@ this.audioContext?.currentTime || 0
     }
   }
 
-  private populateSongsFromUrls(playlistArtist: string = 'Tiesto'): void {
+  private populateSongsFromUrls(playlistArtist: string = 'Biblioteca local'): void {
     // Randomize the songList array
     const shuffledSongList = [...this.songList].sort(() => Math.random() - 0.5);
 
@@ -2461,7 +2355,7 @@ this.audioContext?.currentTime || 0
       const duration = '--:--';
       const totalDurationSeconds = 0;
       const currentTime = '0:00';
-      const coverUrl = 'https://dj.beatport.com/picx/vinyl_default2.png';
+      const coverUrl = this.localCoverUrl;
       const waveformData = Array(100).fill(0).map(() => Math.floor(Math.random() * 100));
 
       return {
@@ -2484,7 +2378,7 @@ this.audioContext?.currentTime || 0
       const url = shuffledSongList[idx].url;
       const decodedUrl = this.decodeUrlWithEncodingDetection(url);
       const filename = decodedUrl.split('/').pop() || '';
-      const nameWithoutExt = filename.replace('.mp3', '');
+      const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
       // Try to get duration quickly from audio element
       let duration = '--:--';
       let durationSeconds = 0;
@@ -2516,30 +2410,18 @@ this.audioContext?.currentTime || 0
             // Keep existing values for properties not in metadata
             const updatedSong = { ...this.songs[index] };
 
-            // Update with metadata values
+            // Update with metadata values (prefer the file's own ID3 tags)
             updatedSong.title = metadata.title || updatedSong.title;
-            // Always use the playlist artist instead of extracted artist
-            updatedSong.artists = playlistArtist;
+            updatedSong.artists = metadata.artists || metadata.artist || playlistArtist;
             updatedSong.composer = metadata.composer || '';
+
+            // Album art comes only from the file's embedded picture (no external APIs)
+            if (metadata.picture) {
+              updatedSong.coverUrl = metadata.picture;
+            }
 
             // Update the song in the array
             this.songs[index] = updatedSong;
-
-            // Try to get album art if available
-            if (metadata.picture) {
-              updatedSong.coverUrl = metadata.picture;
-            } else {
-              // If no picture in metadata, try to get album art from the service
-              this.albumArtService.getAlbumArt(playlistArtist, metadata.title || '')
-                .subscribe(
-                  artUrl => {
-                    if (artUrl && index < this.songs.length) {
-                      this.songs[index].coverUrl = artUrl;
-                    }
-                  },
-                  error => console.error('Error fetching album art:', error)
-                );
-            }
           }
         },
         error => {
@@ -2550,7 +2432,7 @@ this.audioContext?.currentTime || 0
             // Extract basic metadata from filename
             const decodedUrl = this.decodeUrlWithEncodingDetection(songUpload.url);
             const filename = decodedUrl.split('/').pop() || '';
-            const nameWithoutExt = filename.replace('.mp3', '');
+            const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
 
             let title = 'Unknown Title';
             let artists = '';
@@ -2590,29 +2472,6 @@ this.audioContext?.currentTime || 0
         }
       );
     });
-
-    // After creating songs with default images, fetch album artwork for each song
-    this.fetchAlbumArtForSongs();
-  }
-
-  /**
-   * Fetches album artwork for all songs using the AlbumArtService
-   * with a 1.5-second delay after song information is loaded
-   */
-  private fetchAlbumArtForSongs() {
-    // Add a 1.5-second delay before fetching album art
-    setTimeout(() => {
-      console.log('Starting album art fetch after 1.5-second delay');
-      this.songs.forEach((song, index) => {
-        // Fetch album art for each song
-        this.albumArtService.getAlbumArt(song.title, song.artists)
-          .subscribe(imageUrl => {
-            // Update the song's cover URL with the fetched image URL
-            this.songs[index].coverUrl = imageUrl;
-            console.log(`Fetched album art for "${song.title}" by ${song.artists}: ${imageUrl}`);
-          });
-      });
-    }, 2000); // 1.5 seconds delay
   }
 
   private getHowlerEndedListener(): () => void {
