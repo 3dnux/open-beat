@@ -1,0 +1,25 @@
+# Dependencies
+/node_modules
+
+# Build outputs
+/dist
+/out-tsc
+
+# Angular cache
+/.angular
+
+# Generated at build/serve time by scripts/generate-music-manifest.js
+/src/assets/music/manifest.json
+
+# IDE / editor
+/.idea
+/.vscode
+*.swp
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db

@@ -6,7 +6,10 @@
     "start": "ng serve --host 0.0.0.0",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "music:scan": "node scripts/generate-music-manifest.js",
+    "prestart": "npm run music:scan",
+    "prebuild": "npm run music:scan"
   },
   "prettier": {
     "overrides": [

@@ -13,7 +13,6 @@ import {ListSong} from '../dj/list-song/list-song';
 import { FormsModule } from '@angular/forms';
 import { CommonModule } from '@angular/common';
 import * as jschardet from 'jschardet';
-import { AlbumArtService } from '../services/album-art.service';
 import { DjEngineService } from '../services/dj-engine.service';
 import { BpmDetectionService } from '../services/bpm-detection.service';
 import { DjTransitionService } from '../services/dj-transition.service';
@@ -49,146 +48,42 @@ export interface playlists {
 export class Home implements AfterViewInit, OnDestroy {
 
 
-  playlistsApp: playlists[] = [
-    {
-      name: 'Tiësto Set #029',
-      artist: 'Tiesto',
-      img: 'https://geo-media.beatport.com/image_size/590x404/846683c6-4b4d-44db-8ebe-13d5d3cd5f92.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/Adagio%20For%20Strings.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/C\'mon%20(Original%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Coming%20Home%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Dawnbreaker%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Drifting%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Grapevine%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Light%20Years%20Away%20(Extended%20Radio%20Edit).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Lose%20Control%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Meet%20Her%20(Ti%C3%ABsto%20vs.%20Da%20Hool%20-%20Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/My%20Whistle%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Party%20Time%20(Extended%20Mix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Pulverturm%20(Ti%C3%ABsto\'s%20Big%20Room%20Extended%20Remix).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/Red%20Lights%20(Extended%20Version).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/The%20Hypno.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/WOW%20(Extended%20Mix).mp3'
+  playlistsApp: playlists[] = [];
+
+  // Local placeholder cover (no external image/API calls)
+  private readonly localCoverUrl = 'assets/covers/vinyl.svg';
+
+  /**
+   * Loads the local music library from src/assets/music.
+   * The manifest.json file is generated automatically before `npm start` /
+   * `npm run build` by scripts/generate-music-manifest.js, since a browser
+   * cannot list a directory on its own.
+   */
+  private loadLocalMusic(): void {
+    fetch('assets/music/manifest.json')
+      .then(res => (res.ok ? res.json() : { tracks: [] }))
+      .then((manifest: { tracks?: string[] }) => {
+        const tracks = manifest?.tracks || [];
+        if (!tracks.length) {
+          console.warn('No songs found in src/assets/music (empty manifest). Run "npm run music:scan" after adding files.');
+          return;
         }
-      ]
-    },
-    {
-      name: 'Deorro Set #001',
-      artist: 'Deorro',
-      img: 'https://geo-media.beatport.com/image_size/590x404/651dd449-1d01-4a84-b352-c3a5caecb7fe.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Five More Hours - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Flashlight - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Freak (feat. Steve Bays) - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Me Caes Muy Bien - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Perdoname - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Savage - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Yee - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/deorro/Yo Las Pongo - Original Mix.mp3'
-        }
-      ]
-    },
-    {
-      name: 'Purple Disco Machine Set #004',
-      artist:'Purple Disco Machine',
-      img: 'https://geo-media.beatport.com/image_size/590x404/7425b20c-6134-428c-b006-b0572f07a75f.jpg',
-      songs: [
-        {
-          url: 'https://zoneapi.cloud/music/purple/About Damn Time - Purple Disco Machine Extended Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/All My Life - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/At Night - Purple Disco Machine Extended Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Body Funk - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Coma Cat - Purple Disco Machine Extended Re-Work.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Dished (Male Stripper) - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Don\'t You Want Me - Purple Disco Machine Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Drop The Pressure - Purple Disco Machine Remix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Emotion - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Get Up 24 - Original Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Heartbreaker - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/In My Arms - Extended Mix.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/link-ref-Groovejet.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/On My Mind - Purple Disco Machine Remix (Extended).mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/Substitution - Extended.mp3'
-        },
-        {
-          url: 'https://zoneapi.cloud/music/purple/YoYo Disco - Purple Disco Machine Extended Remix.mp3'
-        }
-      ]
-    }
-  ];
+        const songs: songUpload[] = tracks.map(track => ({
+          // Encode each path segment so spaces and special characters in
+          // filenames produce valid URLs
+          url: 'assets/music/' + track.split('/').map(encodeURIComponent).join('/')
+        }));
+        this.playlistsApp = [
+          {
+            name: 'Mi Musica',
+            artist: 'Biblioteca local',
+            img: this.localCoverUrl,
+            songs
+          }
+        ];
+      })
+      .catch(err => console.error('Error loading local music manifest:', err));
+  }
 
 
 
@@ -244,22 +139,18 @@ export class Home implements AfterViewInit, OnDestroy {
   private nextDelayMix: GainNode | null = null;
   private nextDryMix: GainNode | null = null;
 
+  // Sweepable high-pass filters used for the DJ-style "bass swap" during crossfades
+  private currentBassCutNode: BiquadFilterNode | null = null;
+  private nextBassCutNode: BiquadFilterNode | null = null;
+
+  // Crossfade (Beatport-style auto mix) state
+  private crossfadeActive: boolean = false;
+  private crossfadeRafId: number = 0;
+
   // Audio analyzer for frequency analysis
   private analyzer: AnalyserNode | null = null;
   // FX Router inserted between master gain and post-sum chain
   private fxRouter?: ReturnType<AIAudioProcessingService['buildFxRouter']>;
-
-  // DJ transition nodes
-  private transitionNodes: {
-    currentEqLow: BiquadFilterNode,
-    currentEqMid: BiquadFilterNode,
-    currentEqHigh: BiquadFilterNode,
-    nextEqLow: BiquadFilterNode,
-    nextEqMid: BiquadFilterNode,
-    nextEqHigh: BiquadFilterNode,
-    currentGain: GainNode,
-    nextGain: GainNode
-  } | null = null;
 
   // DJ Controls state
   fxIntensity: number = 0.6; // 0-1
@@ -283,7 +174,6 @@ export class Home implements AfterViewInit, OnDestroy {
   private visibilityHandler: (() => void) | null = null;
 
   constructor(
-    private albumArtService: AlbumArtService,
     private bpmDetectionService: BpmDetectionService,
     private djTransitionService: DjTransitionService,
     private metadataService: MetadataService,
@@ -293,7 +183,7 @@ export class Home implements AfterViewInit, OnDestroy {
     private djEngine: DjEngineService,
     private autoDj: AutoDjService
   ) {
-    this.populateSongsFromUrls();
+    this.loadLocalMusic();
 
     // Audio engine will be initialized on first user gesture (Play)
   }
@@ -454,11 +344,19 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentAudioPlayer = null;
       this.nextAudioPlayer = null;
 
+      // Stop any crossfade in progress
+      this.crossfadeActive = false;
+      if (this.crossfadeRafId) {
+        cancelAnimationFrame(this.crossfadeRafId);
+        this.crossfadeRafId = 0;
+      }
+
       const nodes: (AudioNode | null)[] = [
         this.currentSourceNode, this.nextSourceNode, this.currentPannerNode, this.nextPannerNode,
         this.reverbNode, this.reverbGain, this.dryGain,
         this.currentDelayNode, this.currentFeedbackGain, this.currentDelayMix, this.currentDryMix,
         this.nextDelayNode, this.nextFeedbackGain, this.nextDelayMix, this.nextDryMix,
+        this.currentBassCutNode, this.nextBassCutNode,
         this.analyzer
       ];
       nodes.forEach(n => { try { n && n.disconnect(); } catch {} });
@@ -467,6 +365,7 @@ export class Home implements AfterViewInit, OnDestroy {
       this.reverbNode = this.reverbGain = this.dryGain = null;
       this.currentDelayNode = this.currentFeedbackGain = this.currentDelayMix = this.currentDryMix = null;
       this.nextDelayNode = this.nextFeedbackGain = this.nextDelayMix = this.nextDryMix = null;
+      this.currentBassCutNode = this.nextBassCutNode = null;
       this.analyzer = null;
     } catch (e) {
       console.warn('Error tearing down HTML Audio pipeline', e);
@@ -832,13 +731,7 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentFeedbackGain = processingNodes.feedbackGain;
       this.currentDelayMix = processingNodes.delayMix;
       this.currentDryMix = processingNodes.dryMix;
-      try {
-        const song = this.songs[0];
-        if (song && this.audioContext) {
-          const meta: any = { id: song.songUrl, title: song.title, artist: song.artists, bpm: song.bpm || 120 };
-          this.djEngine.attachCurrent(sourceNode, meta);
-        }
-      } catch {}
+      this.currentBassCutNode = processingNodes.bassCut;
     } else {
       this.nextSourceNode = sourceNode;
       this.nextPannerNode = pannerNode;
@@ -847,14 +740,12 @@ export class Home implements AfterViewInit, OnDestroy {
       this.nextFeedbackGain = processingNodes.feedbackGain;
       this.nextDelayMix = processingNodes.delayMix;
       this.nextDryMix = processingNodes.dryMix;
-      try {
-        const song = this.songs[1];
-        if (song && this.audioContext) {
-          const meta: any = { id: song.songUrl, title: song.title, artist: song.artists, bpm: song.bpm || 120 };
-          this.djEngine.attachNext(sourceNode, meta);
-        }
-      } catch {}
+      this.nextBassCutNode = processingNodes.bassCut;
     }
+    // NOTE: sources are intentionally NOT attached to DjEngineService here.
+    // Its planTransition() connected the raw sources to a second, parallel
+    // audio path (bypassing this chain), which doubled the signal and made
+    // transitions sound wrong.
   }
 
   /**
@@ -868,13 +759,22 @@ export class Home implements AfterViewInit, OnDestroy {
     delayNode: DelayNode,
     feedbackGain: GainNode,
     delayMix: GainNode,
-    dryMix: GainNode
+    dryMix: GainNode,
+    bassCut: BiquadFilterNode
   } {
     if (!this.audioContext) {
       throw new Error('AudioContext not initialized');
     }
 
     // Create advanced audio processing nodes for ultra-high-quality sound
+
+    // 0. Sweepable high-pass used for the DJ bass swap during transitions.
+    // At 20 Hz it is acoustically neutral; during a crossfade its frequency is
+    // ramped up to remove the lows of one deck while the other's come in.
+    const bassCut = this.audioContext.createBiquadFilter();
+    bassCut.type = 'highpass';
+    bassCut.frequency.value = 20;
+    bassCut.Q.value = 0.7;
 
     // 1. Pre-gain to optimize input level
     const preGain = this.audioContext.createGain();
@@ -959,6 +859,7 @@ export class Home implements AfterViewInit, OnDestroy {
     feedbackGain.connect(delayNode);
 
     // Connect the enhanced processing chain
+    bassCut.connect(preGain);
     preGain.connect(subBass);
     subBass.connect(bassBoost);
     bassBoost.connect(lowerMid);
@@ -983,13 +884,14 @@ export class Home implements AfterViewInit, OnDestroy {
 
     // Return the input and output nodes of the chain, plus delay control nodes
     return {
-      input: preGain, // Use preGain as the input node instead of bassBoost
+      input: bassCut, // Chain starts at the sweepable bass-cut filter
       output: compressor,
       // Add these properties to the returned object
       delayNode: delayNode,
       feedbackGain: feedbackGain,
       delayMix: delayMix,
-      dryMix: dryMix
+      dryMix: dryMix,
+      bassCut: bassCut
     };
   }
 
@@ -1012,7 +914,7 @@ export class Home implements AfterViewInit, OnDestroy {
           composer: '',
           duration: '--:--',
           currentTime: '0:00',
-          coverUrl: 'https://dj.beatport.com/picx/vinyl_default2.png',
+          coverUrl: this.localCoverUrl,
           waveformData: Array(100).fill(0).map(() => Math.floor(Math.random() * 100)),
           songUrl: randomSongUpload.url,
           isPlaying: false,
@@ -1045,8 +947,13 @@ export class Home implements AfterViewInit, OnDestroy {
       // The next song becomes the current song
       const newCurrentSong = this.songs[0];
 
-      // Reset transition flag for the new song
+      // Reset transition flag for the new song and stop any stale crossfade loop
       this.transitionStarted = false;
+      this.crossfadeActive = false;
+      if (this.crossfadeRafId) {
+        cancelAnimationFrame(this.crossfadeRafId);
+        this.crossfadeRafId = 0;
+      }
 
       // Check if we're using Howler for audio
       if (this.howlerAudioService.getCurrentSound()) {
@@ -1116,6 +1023,7 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentFeedbackGain = this.nextFeedbackGain;
       this.currentDelayMix = this.nextDelayMix;
       this.currentDryMix = this.nextDryMix;
+      this.currentBassCutNode = this.nextBassCutNode;
 
       // Reset next nodes
       this.nextSourceNode = null;
@@ -1124,6 +1032,16 @@ export class Home implements AfterViewInit, OnDestroy {
       this.nextFeedbackGain = null;
       this.nextDelayMix = null;
       this.nextDryMix = null;
+      this.nextBassCutNode = null;
+
+      // Make sure the promoted deck plays with its full low end restored
+      if (this.currentBassCutNode && this.audioContext) {
+        try {
+          const now = this.audioContext.currentTime;
+          this.currentBassCutNode.frequency.cancelScheduledValues(now);
+          this.currentBassCutNode.frequency.setValueAtTime(20, now);
+        } catch {}
+      }
 
       // Reconnect analyzer to new current source if needed
       if (this.analyzer && this.currentSourceNode) {
@@ -1261,14 +1179,15 @@ export class Home implements AfterViewInit, OnDestroy {
     // Update progress percentage (0-100)
     firstSong.progress = (this.currentAudioPlayer.currentTime / this.currentAudioPlayer.duration) * 100;
 
-    // Check if we need to start the DJ transition (exactly 20 seconds before the end as requested)
+    // Check if we need to start the DJ transition (20-30 seconds before the end,
+    // depending on the track's BPM so the blend lasts a musical number of bars)
     if (this.songs.length > 1 && this.nextAudioPlayer && !this.transitionStarted) {
       const totalDuration = this.currentAudioPlayer.duration;
       const remainingTime = totalDuration - this.currentAudioPlayer.currentTime;
+      const crossfadeLead = this.getCrossfadeLeadSeconds();
 
-      // Start transition exactly 20 seconds before the end (AI-driven transition)
-      if (remainingTime <= 20) {
-        console.log(`Starting AI-driven DJ transition with ${remainingTime.toFixed(2)} seconds remaining`);
+      if (isFinite(remainingTime) && remainingTime <= crossfadeLead) {
+        console.log(`Starting DJ crossfade with ${remainingTime.toFixed(2)} seconds remaining (lead: ${crossfadeLead.toFixed(1)}s)`);
         this.startDjTransition();
 
         // Set a flag to track if we've already set up a fallback for this transition attempt
@@ -1378,163 +1297,164 @@ export class Home implements AfterViewInit, OnDestroy {
       return;
     }
 
-    // Fallback to original method if Howler isn't being used
-    if (!this.nextAudioPlayer || this.transitionStarted || !this.currentAudioPlayer || !this.audioContext) return;
+    // Web Audio / HTML5 path: clean equal-power crossfade (Beatport-style auto mix)
+    this.startCrossfade();
+  }
 
-    console.log('Starting professional DJ transition with BPM matching and EQ transitions (fallback method)');
+  /**
+   * How many seconds before the end of the current track the mix should start.
+   * Uses the track's BPM so the blend covers a musical number of bars,
+   * clamped to the 20-30s window; short tracks get a proportionally shorter fade.
+   */
+  private getCrossfadeLeadSeconds(): number {
+    const duration = this.currentAudioPlayer?.duration || 0;
+
+    // Short tracks: quick fade so the blend doesn't eat half the song
+    if (duration > 0 && duration < 90) {
+      return Math.max(4, Math.min(10, duration / 4));
+    }
+
+    const bpm = this.songs[0]?.bpm || 128;
+    // 16 bars (64 beats) of the current track - a typical DJ blend length
+    const sixteenBars = (60 / bpm) * 64;
+    return Math.max(20, Math.min(30, sixteenBars));
+  }
+
+  /**
+   * Starts the automatic DJ crossfade: the next track begins playing silently
+   * and rises with an equal-power curve while the current one fades out.
+   * A "bass swap" (high-pass sweep) keeps the two basslines from clashing,
+   * and the outgoing deck gets a delay/echo tail, like a real DJ mix.
+   */
+  private startCrossfade(): void {
+    if (this.crossfadeActive) return;
+    if (!this.currentAudioPlayer || !this.nextAudioPlayer || this.songs.length < 2) return;
+
+    const current = this.currentAudioPlayer;
+    const next = this.nextAudioPlayer;
+
+    const duration = current.duration;
+    if (!isFinite(duration) || duration <= 0) return;
+
     this.transitionStarted = true;
+    this.crossfadeActive = true;
 
-    // Preload upcoming songs immediately to reduce future transition delays
-    // This is now called earlier in the process to ensure songs are preloaded well before they're needed
+    // Preload upcoming songs so future transitions have no loading gap
     this.preloadUpcomingSongs();
 
-    // Get BPM values for current and next songs
-    const currentSong = this.songs[0];
-    const nextSong = this.songs[1];
-    const currentBpm = currentSong.bpm || 128; // Default to 128 if not detected
-    const nextBpm = nextSong.bpm || 128; // Default to 128 if not detected
+    const remaining = Math.max(0, duration - current.currentTime);
+    const fadeDuration = Math.max(1, Math.min(remaining, this.getCrossfadeLeadSeconds()));
+    const fadeStart = duration - fadeDuration; // in current-track time
 
-    console.log(`Transition between songs: Current BPM: ${currentBpm}, Next BPM: ${nextBpm}`);
-      
-    // Kick off DJ engine transition (EQ moves + FX) quantized to bars
-    try {
-      this.djEngine.start();
-      void this.djEngine.planTransition('long-blend', 32);
-    } catch {}
-      
-    // Calculate remaining time of current song
-    const remainingTime = this.currentAudioPlayer.duration - this.currentAudioPlayer.currentTime;
-      
-    // Aggressively preload the next song to ensure it's ready to play
-    if (this.nextAudioPlayer.readyState < 4) { // HAVE_ENOUGH_DATA = 4
-      console.log('Ensuring next song is fully loaded before transition');
-      this.nextAudioPlayer.load();
+    console.log(`Crossfade started: ${fadeDuration.toFixed(1)}s blend into "${this.songs[1]?.title}"`);
 
-      // If the next song isn't fully loaded, wait a short time and try again
-      if (this.nextAudioPlayer.readyState < 4) {
-        const loadCheckInterval = setInterval(() => {
-          if (this.nextAudioPlayer && this.nextAudioPlayer.readyState >= 4) {
-            clearInterval(loadCheckInterval);
-            this.continueTransition(currentBpm, nextBpm, remainingTime);
-          }
-        }, 100);
-
-        // Set a timeout to prevent waiting too long
-        // Reduced from 2000ms to 1500ms to start transition sooner
-        setTimeout(() => {
-          clearInterval(loadCheckInterval);
-          console.log('Proceeding with transition even though next song may not be fully loaded');
-          this.continueTransition(currentBpm, nextBpm, remainingTime);
-        }, 1500);
-
-        return;
-      }
+    // Make sure the incoming track is ready and start it silently
+    if (next.readyState < 3) { // HAVE_FUTURE_DATA
+      try { next.load(); } catch {}
     }
-
-    // Continue with the transition
-    // --- AI-driven mixing enhancement ---
-    if (this.djTransitionService && this.aiAudioProcessingService && this.currentSourceNode && this.nextSourceNode && this.transitionNodes) {
-      this.djTransitionService.startTransition(
-        this.transitionNodes,
-        currentBpm,
-        nextBpm,
-        remainingTime,
-        this.audioContext,
-        this.aiAudioProcessingService,
-        this.currentSourceNode,
-        this.nextSourceNode
-      );
-    } else {
-      this.continueTransition(currentBpm, nextBpm, remainingTime);
-    }
-  }
-
-  /**
-   * Continues the DJ transition after ensuring the next song is loaded
-   */
-  private continueTransition(currentBpm: number, nextBpm: number, remainingTime: number): void {
-    if (!this.nextAudioPlayer || !this.currentAudioPlayer || !this.audioContext) return;
-
-    // Calculate optimal start time based on BPM and phrase alignment
-    // Start transition earlier to ensure no gap between songs
-    const optimalStartTime = this.djTransitionService.calculateOptimalStartTime(
-      this.currentAudioPlayer.currentTime,
-      this.currentAudioPlayer.duration,
-      currentBpm,
-      nextBpm
-    );
-
-    // If we're past the optimal start time, start transition immediately
-    // Otherwise, schedule the transition for the optimal time
-    if (this.currentAudioPlayer.currentTime >= optimalStartTime) {
-      this.executeTransition(currentBpm, nextBpm, remainingTime);
-    } else {
-      const timeUntilTransition = (optimalStartTime - this.currentAudioPlayer.currentTime) * 1000;
-      console.log(`Scheduling transition to start in ${timeUntilTransition / 1000} seconds for optimal phrase alignment`);
-      setTimeout(() => {
-        this.executeTransition(currentBpm, nextBpm, remainingTime);
-      }, timeUntilTransition);
-    }
-  }
-
-  /**
-   * Executes the actual DJ transition using the DjTransitionService
-   * @param currentBpm BPM of the current song
-   * @param nextBpm BPM of the next song
-   * @param remainingTime Remaining time of the current song in seconds
-   */
-  private executeTransition(currentBpm: number, nextBpm: number, remainingTime: number): void {
-    if (!this.nextAudioPlayer || !this.currentAudioPlayer || !this.audioContext || !this.currentSourceNode || !this.nextSourceNode) return;
-
-    // Ensure the next song is ready to play
-    if (this.nextAudioPlayer.readyState < 3) { // HAVE_FUTURE_DATA = 3
-      this.nextAudioPlayer.load();
-    }
-
-    // Start playing the next song
-    const playPromise = this.nextAudioPlayer.play();
-
-    // Handle play promise to avoid uncaught promise rejection
+    next.volume = 0;
+    const playPromise = next.play();
     if (playPromise !== undefined) {
       playPromise.catch(error => {
-        console.error('Error starting next song playback:', error);
-        // Try again after a short delay if autoplay was prevented
-        setTimeout(() => {
-          this.nextAudioPlayer?.play().catch(e => console.error('Retry failed:', e));
-        }, 100);
+        console.error('Error starting next song during crossfade:', error);
+        setTimeout(() => next.play().catch(e => console.error('Crossfade play retry failed:', e)), 150);
       });
     }
 
-    // Create professional DJ transition using our service
-    const transitionResult = this.djTransitionService.createTransition(
-      this.currentSourceNode,
-      this.nextSourceNode,
-      currentBpm,
-      nextBpm,
-      this.audioContext
-    );
+    // Classic DJ bass swap via Web Audio (when the audio graph is available)
+    this.scheduleBassSwap(fadeDuration);
 
-    // Store the transition nodes
-    this.transitionNodes = transitionResult.transitionNodes;
+    const tick = () => {
+      if (!this.crossfadeActive) return;
+      // Stop if the decks were swapped elsewhere (e.g. fallback moveToNextSong)
+      if (this.currentAudioPlayer !== current || this.nextAudioPlayer !== next) {
+        this.crossfadeActive = false;
+        return;
+      }
 
-    // Connect the output chains to the main gain node
-    transitionResult.currentChain.connect(this.gainNode!);
-    transitionResult.nextChain.connect(this.gainNode!);
+      // Keep the flag asserted so 'ended' fallbacks don't double-advance
+      this.transitionStarted = true;
 
-    // Start the transition
-    this.djTransitionService.startTransition(
-      this.transitionNodes,
-      currentBpm,
-      nextBpm,
-      remainingTime,
-      this.audioContext
-    );
+      // If the user paused, freeze the blend; resume the incoming deck with playback
+      if (current.paused && !current.ended) {
+        if (!next.paused) { try { next.pause(); } catch {} }
+        this.crossfadeRafId = requestAnimationFrame(tick);
+        return;
+      }
+      if (next.paused && !current.ended) {
+        next.play().catch(() => {});
+      }
 
-    // We'll still use our spatial audio for enhanced effect
-    this.startSpatialTransition();
+      const remainingNow = (current.duration || duration) - current.currentTime;
+      const progress = Math.max(0, Math.min(1, (current.currentTime - fadeStart) / fadeDuration));
 
-    // Start adjusting volumes for smooth transition
-    this.adjustVolumes();
+      // Equal-power curves: perceived loudness stays constant during the blend
+      current.volume = Math.max(0, Math.min(1, Math.cos(progress * Math.PI / 2)));
+      next.volume = Math.max(0, Math.min(1, Math.sin(progress * Math.PI / 2)));
+
+      // Delay/echo tail on the outgoing deck as it fades
+      try { this.adjustDelayEffect(remainingNow); } catch {}
+
+      if (current.ended || remainingNow <= 0.25 || progress >= 1) {
+        this.finishCrossfade(current, next);
+        return;
+      }
+      this.crossfadeRafId = requestAnimationFrame(tick);
+    };
+    this.crossfadeRafId = requestAnimationFrame(tick);
+  }
+
+  /**
+   * Schedules the "bass swap": the incoming deck enters without lows (so the
+   * two basslines never clash) and gets them back mid-blend, while the
+   * outgoing deck loses its lows during the second half of the fade.
+   */
+  private scheduleBassSwap(fadeDuration: number): void {
+    if (!this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    try {
+      if (this.nextBassCutNode) {
+        const f = this.nextBassCutNode.frequency;
+        f.cancelScheduledValues(now);
+        f.setValueAtTime(220, now);
+        f.setValueAtTime(220, now + fadeDuration * 0.3);
+        f.exponentialRampToValueAtTime(20, now + fadeDuration * 0.75);
+      }
+      if (this.currentBassCutNode) {
+        const f = this.currentBassCutNode.frequency;
+        f.cancelScheduledValues(now);
+        f.setValueAtTime(20, now);
+        f.setValueAtTime(20, now + fadeDuration * 0.35);
+        f.exponentialRampToValueAtTime(240, now + fadeDuration * 0.9);
+      }
+    } catch (e) {
+      console.warn('Bass swap scheduling failed:', e);
+    }
+  }
+
+  /**
+   * Ends the crossfade: silences and detaches the outgoing deck and promotes
+   * the incoming one via moveToNextSong().
+   */
+  private finishCrossfade(current: HTMLAudioElement, next: HTMLAudioElement): void {
+    if (!this.crossfadeActive) return;
+    this.crossfadeActive = false;
+    if (this.crossfadeRafId) cancelAnimationFrame(this.crossfadeRafId);
+
+    // Detach listeners from the outgoing element BEFORE stopping it, so its
+    // 'ended' event can't fire later and trigger a second song change
+    try {
+      current.removeEventListener('timeupdate', this.updateProgressListener);
+      if (this.currentSongEndedListener) {
+        current.removeEventListener('ended', this.currentSongEndedListener);
+      }
+    } catch {}
+    try { current.pause(); } catch {}
+    current.volume = 0;
+    next.volume = 1;
+
+    console.log('Crossfade complete, promoting next track');
+    this.moveToNextSong();
   }
 
   /**
@@ -1675,76 +1595,6 @@ export class Home implements AfterViewInit, OnDestroy {
     // Adjust dry/wet balance
     this.dryGain.gain.setValueAtTime(0.7, now);
     this.dryGain.gain.linearRampToValueAtTime(0.5, now + transitionDuration);
-  }
-
-  private adjustVolumes(): void {
-    // Check if we're using Howler for audio (preferred method)
-    if (this.howlerAudioService.getCurrentSound() && this.howlerAudioService.getNextSound() && this.transitionStarted) {
-      // Let Howler handle the crossfade with its superior fade algorithm
-      // This is already set up in the startTransition method
-
-      // Adjust delay effect parameters based on remaining time
-      const currentSound = this.howlerAudioService.getCurrentSound();
-      const remainingTime = currentSound ?
-        currentSound.duration() - (currentSound.seek() as number) : 0;
-
-      this.adjustDelayEffect(remainingTime);
-
-      // If the current song has ended but the ended event hasn't fired yet,
-      // manually trigger the transition to the next song
-      if (remainingTime <= 0 && this.songs.length > 1) {
-        this.moveToNextSong();
-        return; // Stop the animation frame loop
-      }
-
-      // Continue adjusting effects until the current song ends
-      if (remainingTime > 0) {
-        requestAnimationFrame(() => this.adjustVolumes());
-      }
-
-      return;
-    }
-
-    // Fallback to original method if Howler isn't being used
-    if (!this.currentAudioPlayer || !this.nextAudioPlayer || !this.transitionStarted) return;
-
-    // Get remaining time of current song
-    const remainingTime = this.currentAudioPlayer.duration - this.currentAudioPlayer.currentTime;
-
-    // Calculate volume levels based on remaining time with improved curve
-    // Use a more natural exponential fade curve instead of linear
-    // This prevents the abrupt volume changes near the end of songs
-    const transitionProgress = Math.max(0, Math.min(1, 1 - (remainingTime / 20)));
-
-    // Use cosine curve for current song (stays louder longer, then fades quickly at the end)
-    // Use sine curve for next song (starts quietly, then increases more quickly)
-    const currentVolume = Math.cos(transitionProgress * Math.PI / 2); // 1 -> 0 with curve
-    const nextVolume = Math.sin(transitionProgress * Math.PI / 2); // 0 -> 1 with curve
-
-    // Apply volume changes
-    this.currentAudioPlayer.volume = currentVolume;
-    this.nextAudioPlayer.volume = nextVolume;
-
-    // Adjust delay effect parameters based on remaining time
-    this.adjustDelayEffect(remainingTime);
-
-    // If the current song is about to end (less than 0.5 seconds remaining),
-    // ensure the next song is playing at full volume for seamless transition
-    if (remainingTime < 0.5 && this.nextAudioPlayer.volume < 1) {
-      this.nextAudioPlayer.volume = 1;
-    }
-
-    // If the current song has ended but the ended event hasn't fired yet,
-    // manually trigger the transition to the next song
-    if (remainingTime <= 0 && this.songs.length > 1) {
-      this.moveToNextSong();
-      return; // Stop the animation frame loop
-    }
-
-    // Continue adjusting volumes and effects until the current song ends
-    if (remainingTime > 0) {
-      requestAnimationFrame(() => this.adjustVolumes());
-    }
   }
 
   /**
@@ -2495,7 +2345,7 @@ this.audioContext?.currentTime || 0
     }
   }
 
-  private populateSongsFromUrls(playlistArtist: string = 'Tiesto'): void {
+  private populateSongsFromUrls(playlistArtist: string = 'Biblioteca local'): void {
     // Randomize the songList array
     const shuffledSongList = [...this.songList].sort(() => Math.random() - 0.5);
 
@@ -2505,7 +2355,7 @@ this.audioContext?.currentTime || 0
       const duration = '--:--';
       const totalDurationSeconds = 0;
       const currentTime = '0:00';
-      const coverUrl = 'https://dj.beatport.com/picx/vinyl_default2.png';
+      const coverUrl = this.localCoverUrl;
       const waveformData = Array(100).fill(0).map(() => Math.floor(Math.random() * 100));
 
       return {
@@ -2528,7 +2378,7 @@ this.audioContext?.currentTime || 0
       const url = shuffledSongList[idx].url;
       const decodedUrl = this.decodeUrlWithEncodingDetection(url);
       const filename = decodedUrl.split('/').pop() || '';
-      const nameWithoutExt = filename.replace('.mp3', '');
+      const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
       // Try to get duration quickly from audio element
       let duration = '--:--';
       let durationSeconds = 0;
@@ -2560,30 +2410,18 @@ this.audioContext?.currentTime || 0
             // Keep existing values for properties not in metadata
             const updatedSong = { ...this.songs[index] };
 
-            // Update with metadata values
+            // Update with metadata values (prefer the file's own ID3 tags)
             updatedSong.title = metadata.title || updatedSong.title;
-            // Always use the playlist artist instead of extracted artist
-            updatedSong.artists = playlistArtist;
+            updatedSong.artists = metadata.artists || metadata.artist || playlistArtist;
             updatedSong.composer = metadata.composer || '';
+
+            // Album art comes only from the file's embedded picture (no external APIs)
+            if (metadata.picture) {
+              updatedSong.coverUrl = metadata.picture;
+            }
 
             // Update the song in the array
             this.songs[index] = updatedSong;
-
-            // Try to get album art if available
-            if (metadata.picture) {
-              updatedSong.coverUrl = metadata.picture;
-            } else {
-              // If no picture in metadata, try to get album art from the service
-              this.albumArtService.getAlbumArt(playlistArtist, metadata.title || '')
-                .subscribe(
-                  artUrl => {
-                    if (artUrl && index < this.songs.length) {
-                      this.songs[index].coverUrl = artUrl;
-                    }
-                  },
-                  error => console.error('Error fetching album art:', error)
-                );
-            }
           }
         },
         error => {
@@ -2594,7 +2432,7 @@ this.audioContext?.currentTime || 0
             // Extract basic metadata from filename
             const decodedUrl = this.decodeUrlWithEncodingDetection(songUpload.url);
             const filename = decodedUrl.split('/').pop() || '';
-            const nameWithoutExt = filename.replace('.mp3', '');
+            const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
 
             let title = 'Unknown Title';
             let artists = '';
@@ -2634,29 +2472,6 @@ this.audioContext?.currentTime || 0
         }
       );
     });
-
-    // After creating songs with default images, fetch album artwork for each song
-    this.fetchAlbumArtForSongs();
-  }
-
-  /**
-   * Fetches album artwork for all songs using the AlbumArtService
-   * with a 1.5-second delay after song information is loaded
-   */
-  private fetchAlbumArtForSongs() {
-    // Add a 1.5-second delay before fetching album art
-    setTimeout(() => {
-      console.log('Starting album art fetch after 1.5-second delay');
-      this.songs.forEach((song, index) => {
-        // Fetch album art for each song
-        this.albumArtService.getAlbumArt(song.title, song.artists)
-          .subscribe(imageUrl => {
-            // Update the song's cover URL with the fetched image URL
-            this.songs[index].coverUrl = imageUrl;
-            console.log(`Fetched album art for "${song.title}" by ${song.artists}: ${imageUrl}`);
-          });
-      });
-    }, 2000); // 1.5 seconds delay
   }
 
   private getHowlerEndedListener(): () => void {
