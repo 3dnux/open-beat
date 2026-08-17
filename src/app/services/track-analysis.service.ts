@@ -76,8 +76,13 @@ export class TrackAnalysisService implements OnDestroy {
     return new Promise<TrackAnalysis>((resolve, reject) => {
       const worker = this.ensureWorker();
       this.pending.set(id, { resolve, reject });
-      // Transfer the buffer (zero-copy) — the main thread frees it immediately
-      worker.postMessage({ type: 'analyze', pcm, sampleRate, id }, [pcm.buffer]);
+      try {
+        // Transfer the buffer (zero-copy) — the main thread frees it immediately
+        worker.postMessage({ type: 'analyze', pcm, sampleRate, id }, [pcm.buffer]);
+      } catch (e) {
+        this.pending.delete(id);
+        reject(e);
+      }
     });
   }
 
@@ -92,10 +97,16 @@ export class TrackAnalysisService implements OnDestroy {
       if (msg.ok && msg.result) entry.resolve(msg.result);
       else entry.reject(new Error(msg.error || 'Track analysis failed'));
     });
+    const created = this.worker;
     this.worker.addEventListener('error', err => {
       // Fail everything pending; callers fall back to heuristic mixing
-      for (const [, entry] of this.pending) entry.reject(err);
+      const reason = new Error((err as ErrorEvent)?.message || 'DJ analyzer worker crashed');
+      for (const [, entry] of this.pending) entry.reject(reason);
       this.pending.clear();
+      // Tear down the dead worker so the next analyze() recreates a fresh one
+      // instead of posting into a void and hanging the queue forever
+      try { created.terminate(); } catch {}
+      if (this.worker === created) this.worker = null;
     });
     return this.worker;
   }
@@ -103,6 +114,8 @@ export class TrackAnalysisService implements OnDestroy {
   ngOnDestroy(): void {
     this.worker?.terminate();
     this.worker = null;
+    const reason = new Error('TrackAnalysisService destroyed');
+    for (const [, entry] of this.pending) entry.reject(reason);
     this.pending.clear();
   }
 }

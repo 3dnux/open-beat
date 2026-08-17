@@ -25,7 +25,7 @@
     <div>
       <p class="text-sm">PlayList</p>
       <div class="inline-flex">
-        <button class="m-2" (click)="songs = []">
+        <button class="m-2" (click)="clearQueue()">
           <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#FFFFFF"><path d="M400-80 0-480l400-400 71 71-329 329 329 329-71 71Z"/></svg>
         </button>
         <p class="font-semibold mt-1 text-xl">{{ selectedPlaylist?.name || 'Playlist' }}</p>

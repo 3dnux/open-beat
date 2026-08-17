@@ -245,11 +245,14 @@ function analyzeTempo(pcm: Float32Array, sr: number, duration: number) {
   }
   const combScore = (T: number, phase: number): number => {
     let s = 0;
+    let teeth = 0;
     for (let t = phase; t < excerptLen / sr; t += T) {
       const idx = Math.round((t * sr) / hop);
-      if (idx >= 0 && idx < envLen) s += env[idx];
+      if (idx >= 0 && idx < envLen) { s += env[idx]; teeth++; }
     }
-    return s;
+    // Normalize by tooth count: a raw sum systematically favors smaller
+    // intervals (more comb teeth) on weak-transient material
+    return teeth > 0 ? s / teeth : 0;
   };
   let bestT = interval;
   let bestPhase = beats[0] % interval;
@@ -292,9 +295,12 @@ function analyzeTempo(pcm: Float32Array, sr: number, duration: number) {
   const phaseScore = [0, 0, 0, 0];
   const maxBeats = Math.min(beats.length, 96);
   for (let i = 0; i < maxBeats; i++) {
-    const tGlobal = excerptStartSec + a + Math.round((beats[i] - a) / interval) * interval;
+    // Bucket each beat by its GRID index, not its array index: missed/extra
+    // taps in beats[] would otherwise scramble the 4-phase histogram
+    const k = Math.round((beats[i] - a) / interval);
+    const tGlobal = excerptStartSec + a + k * interval;
     const s = Math.floor(tGlobal * sr);
-    phaseScore[i % 4] += rmsRange(pcm, s, s + winSamples);
+    phaseScore[((k % 4) + 4) % 4] += rmsRange(pcm, s, s + winSamples);
   }
   let bestBar = 0;
   for (let p = 1; p < 4; p++) if (phaseScore[p] > phaseScore[bestBar]) bestBar = p;

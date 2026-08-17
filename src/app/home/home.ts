@@ -93,6 +93,10 @@ export class Home implements AfterViewInit, OnDestroy {
   selectedPlaylist: playlists | null = null;
 
   loadPlaylistSongs(playlist: playlists): void {
+    // Stop any playback/crossfade from a previous queue before replacing it
+    this.teardownHtmlAudio();
+    this.transitionStarted = false;
+
     this.selectedPlaylist = playlist;
     // Clear the current songList
     this.songList = [];
@@ -104,6 +108,13 @@ export class Home implements AfterViewInit, OnDestroy {
       // Populate songs array from the updated songList, passing the playlist's artist
       this.populateSongsFromUrls(playlist.artist);
     }
+  }
+
+  /** Clears the queue and fully stops playback and any crossfade in progress. */
+  clearQueue(): void {
+    this.teardownHtmlAudio();
+    this.transitionStarted = false;
+    this.songs = [];
   }
 
   private currentAudioPlayer: HTMLAudioElement | null = null;
@@ -515,7 +526,7 @@ export class Home implements AfterViewInit, OnDestroy {
       this.currentAudioPlayer.crossOrigin = 'anonymous';
       // Detect BPM when loading a new song
       this.analyzeSong(firstSong);
-    } else if (this.currentAudioPlayer.src !== firstSong.songUrl) {
+    } else if (!this.isSameSrc(this.currentAudioPlayer, firstSong.songUrl)) {
       // If the current song has changed, create a new audio player
       this.currentAudioPlayer.pause();
       this.currentAudioPlayer = new Audio(firstSong.songUrl);
@@ -543,20 +554,24 @@ export class Home implements AfterViewInit, OnDestroy {
 
         // Only handle the ended event if we haven't already started a transition
         // This prevents the gap between songs
-        if (!this.transitionStarted && this.songs.length > 1) {
+        if (!this.transitionStarted && !this.crossfadeActive && this.songs.length > 1) {
           console.log('Starting DJ transition on song end');
           // Start transition immediately if not already started
           this.startDjTransition();
           transitionAttempted = true;
 
-          // Set a fallback timer to ensure the next song plays even if transition fails
+          // Set a fallback timer to ensure the next song plays even if transition fails.
+          // The head-identity check makes it a no-op when the crossfade already
+          // promoted the next track (otherwise it would double-advance).
+          const headAtEnd = this.songs[0];
           setTimeout(() => {
-            if (!this.transitionStarted && this.songs.length > 1) {
+            if (!this.transitionStarted && !this.crossfadeActive &&
+                this.songs[0] === headAtEnd && this.songs.length > 1) {
               console.log('Fallback: DJ transition did not start properly, moving to next song');
               this.moveToNextSong();
             }
           }, 300); // Short delay to allow transition to start
-        } else if (!this.transitionStarted) {
+        } else if (!this.transitionStarted && !this.crossfadeActive) {
           // If there's no next song, just reset the current song
           firstSong.isPlaying = false;
           firstSong.currentTime = '0:00';
@@ -599,7 +614,7 @@ export class Home implements AfterViewInit, OnDestroy {
         this.nextAudioPlayer.crossOrigin = 'anonymous';
         // Detect BPM for next song
         this.analyzeSong(nextSong);
-      } else if (this.nextAudioPlayer.src !== nextSong.songUrl) {
+      } else if (!this.isSameSrc(this.nextAudioPlayer, nextSong.songUrl)) {
         // If the next song has changed, create a new audio player
         this.nextAudioPlayer.pause();
         this.nextAudioPlayer = new Audio(nextSong.songUrl);
@@ -1132,21 +1147,26 @@ export class Home implements AfterViewInit, OnDestroy {
           newCurrentSong.isPlaying = false;
           newCurrentSong.currentTime = '0:00';
           newCurrentSong.progress = 0;
-          this.transitionStarted = false;
+          // NOTE: transitionStarted is intentionally NOT cleared here — an
+          // active crossfade owns the song change and clearing the flag made
+          // the fallback below double-advance the queue.
 
           // Track whether we attempted to start a transition
           let transitionAttempted = false;
 
           // Check if we should start a transition instead of directly moving to next song
-          if (!this.transitionStarted && this.songs.length > 1 && this.nextAudioPlayer) {
+          if (!this.transitionStarted && !this.crossfadeActive && this.songs.length > 1 && this.nextAudioPlayer) {
             console.log('Starting DJ transition on song end from moveToNextSong');
             // Start transition immediately if not already started
             this.startDjTransition();
             transitionAttempted = true;
 
-            // Set a fallback timer to ensure the next song plays even if transition fails
+            // Fallback timer, no-op when the crossfade already promoted the
+            // next track (head-identity check prevents double-advancing)
+            const headAtEnd = this.songs[0];
             setTimeout(() => {
-              if (!this.transitionStarted && this.songs.length > 1) {
+              if (!this.transitionStarted && !this.crossfadeActive &&
+                  this.songs[0] === headAtEnd && this.songs.length > 1) {
                 console.log('Fallback: DJ transition did not start properly in moveToNextSong, moving to next song');
                 this.moveToNextSong();
               }
@@ -1307,7 +1327,7 @@ export class Home implements AfterViewInit, OnDestroy {
       const songToPreload = this.songs[i];
 
       // Skip if already preloaded
-      if (this.preloadedAudioPlayers[i] && this.preloadedAudioPlayers[i].src === songToPreload.songUrl) {
+      if (this.preloadedAudioPlayers[i] && this.isSameSrc(this.preloadedAudioPlayers[i], songToPreload.songUrl)) {
         continue;
       }
 
@@ -1408,7 +1428,7 @@ export class Home implements AfterViewInit, OnDestroy {
     const a = this.songs[0]?.analysis;
     let start = duration - this.getCrossfadeLeadSeconds();
 
-    if (a && a.outroStart > 0 && isFinite(a.outroStart)) {
+    if (a && a.outroStart > 0 && isFinite(a.outroStart) && duration > 60) {
       // Blend where the outro begins, within sensible bounds
       start = Math.min(Math.max(a.outroStart, duration - 45), duration - 10);
     }
@@ -1509,6 +1529,7 @@ export class Home implements AfterViewInit, OnDestroy {
     playbackRate: number;
     nextStartAt: number;
     makeupGainNext: number;
+    tempoFold: number;
     curA?: TrackAnalysis;
     nextA?: TrackAnalysis;
   } {
@@ -1540,11 +1561,15 @@ export class Home implements AfterViewInit, OnDestroy {
     const curEffBpm = curBpmBase * (this.currentDeckRate || 1);
     let type: 'beatmatch' | 'blend' | 'echo-cut' = 'blend';
     let playbackRate = 1;
+    let tempoFold = 1;
 
     if (curEffBpm > 0 && nextBpm > 0) {
       let target = nextBpm;
       if (curEffBpm / target > 1.5) target *= 2;
       else if (curEffBpm / target < 0.67) target /= 2;
+      // Half/double-time fold factor (2, 1, or 0.5); the PLL needs it so both
+      // decks' phases are compared on the same beat grid
+      tempoFold = target / nextBpm;
       const rate = curEffBpm / target;
       const haveGrids = !!(curA && nextA && curA.beatInterval > 0 && nextA.beatInterval > 0);
 
@@ -1561,9 +1586,10 @@ export class Home implements AfterViewInit, OnDestroy {
     // Blend length: a musical number of beats, capped by the remaining time
     let fadeDuration: number;
     if (type === 'beatmatch' && curA) {
-      const wallBeat = curA.beatInterval / (this.currentDeckRate || 1);
+      // Blend progress is measured in the current deck's media time, so the
+      // length is a count of media-time beats (no wall-clock conversion)
       const beats = (curA.energy > 0.55 && (nextA?.energy ?? 0) > 0.55) ? 32 : 16;
-      fadeDuration = beats * wallBeat;
+      fadeDuration = beats * curA.beatInterval;
     } else if (type === 'blend') {
       fadeDuration = this.getCrossfadeLeadSeconds();
     } else {
@@ -1571,7 +1597,7 @@ export class Home implements AfterViewInit, OnDestroy {
     }
     fadeDuration = Math.max(1, Math.min(remaining - 0.3, fadeDuration));
 
-    return { type, fadeDuration, playbackRate, nextStartAt, makeupGainNext, curA, nextA };
+    return { type, fadeDuration, playbackRate, nextStartAt, makeupGainNext, tempoFold, curA, nextA };
   }
 
   /**
@@ -1684,7 +1710,9 @@ export class Home implements AfterViewInit, OnDestroy {
         lastSyncAt = current.currentTime;
         const fbCur = (current.currentTime - plan.curA.beatOffset) / plan.curA.beatInterval;
         const fbNext = (next.currentTime - plan.nextA.beatOffset) / plan.nextA.beatInterval;
-        let err = (fbCur - fbNext) % 1;
+        // Fold the incoming deck's phase onto the current deck's beat grid so
+        // half/double-time beatmatches lock instead of drifting
+        let err = (fbCur - fbNext * (plan.tempoFold || 1)) % 1;
         if (err > 0.5) err -= 1;
         else if (err < -0.5) err += 1;
         const nudge = Math.max(-0.02, Math.min(0.02, err * 0.08));
@@ -1823,6 +1851,19 @@ export class Home implements AfterViewInit, OnDestroy {
   private applyCurrentDeckRate(): void {
     if (this.currentAudioPlayer) {
       try { this.currentAudioPlayer.playbackRate = this.currentDeckRate; } catch {}
+    }
+  }
+
+  /**
+   * Compares a media element's src (always an absolute URL) with a possibly
+   * relative track URL. A naive === comparison never matches for relative
+   * manifest paths, which made play/pause recreate both decks every time.
+   */
+  private isSameSrc(el: HTMLMediaElement, url: string): boolean {
+    try {
+      return el.src === new URL(url, document.baseURI).href;
+    } catch {
+      return el.src === url;
     }
   }
 
@@ -3036,6 +3077,10 @@ this.audioContext?.currentTime || 0
     if (!song.songUrl || song.analysis) return;
     this.trackAnalysisService.analyze(song.songUrl)
       .then(analysis => {
+        // The metadata callback may have REPLACED the Song object in the queue
+        // (this.songs[i] = {...}); re-resolve by URL so the analysis lands on
+        // the object the UI is actually bound to
+        song = this.songs.find(s => s.songUrl === song.songUrl) || song;
         song.analysis = analysis;
         if (analysis.bpm > 0) song.bpm = Math.round(analysis.bpm * 10) / 10;
         // Only claim a key when the chroma correlation is decisive enough;
