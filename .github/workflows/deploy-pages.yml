@@ -8,9 +8,7 @@ on:
       - main
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -19,9 +17,6 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,19 +33,14 @@ jobs:
       - name: Build (generates the music manifest via prebuild)
         run: npm run build -- --base-href=/open-beat/
 
-      - name: SPA fallback
-        run: cp dist/heyDj/browser/index.html dist/heyDj/browser/404.html
+      - name: SPA fallback and Jekyll bypass
+        run: |
+          cp dist/heyDj/browser/index.html dist/heyDj/browser/404.html
+          touch dist/heyDj/browser/.nojekyll
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+      - name: Publish to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          enablement: true
-
-      - name: Upload site
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/heyDj/browser
-
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/heyDj/browser
+          force_orphan: true
