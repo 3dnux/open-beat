@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
@@ -38,9 +40,30 @@ jobs:
           cp dist/heyDj/browser/index.html dist/heyDj/browser/404.html
           touch dist/heyDj/browser/.nojekyll
 
+      # Strategy A: publish to the gh-pages branch (covers the
+      # "Deploy from a branch" Pages source)
       - name: Publish to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: dist/heyDj/browser
           force_orphan: true
+
+      # Strategy B: direct Actions deployment (covers the
+      # "GitHub Actions" Pages source). Skipped gracefully if the Pages
+      # site does not exist yet.
+      - name: Configure Pages
+        id: cfg
+        continue-on-error: true
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        if: steps.cfg.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/heyDj/browser
+
+      - name: Deploy to Pages
+        if: steps.cfg.outcome == 'success'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
