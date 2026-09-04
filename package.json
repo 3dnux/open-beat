@@ -40,6 +40,7 @@
     "ml-matrix": "^6.10.4",
     "music-metadata": "^11.5.0",
     "music-tempo": "^1.0.3",
+    "pdfjs-dist": "^6.3.289",
     "rxjs": "~7.8.0",
     "tone": "^14.7.77",
     "tslib": "^2.3.0",

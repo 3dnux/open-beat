@@ -12,6 +12,7 @@ import {SongCarousel, Song} from '../dj/song-carousel/song-carousel';
 import {ListSong} from '../dj/list-song/list-song';
 import { FormsModule } from '@angular/forms';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import * as jschardet from 'jschardet';
 import { DjEngineService } from '../services/dj-engine.service';
 import { BpmDetectionService } from '../services/bpm-detection.service';
@@ -39,7 +40,8 @@ export interface playlists {
     CommonModule,
     FormsModule,
     SongCarousel,
-    ListSong
+    ListSong,
+    RouterLink
   ],
   templateUrl: './home.html',
   styleUrl: './home.scss',

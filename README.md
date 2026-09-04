@@ -13,6 +13,18 @@ Open Beat es una aplicación de DJ moderna e inteligente que utiliza tecnología
 - **Análisis emocional**: Analiza el contenido emocional de la música
 - **Gestión de metadatos**: Extrae y gestiona metadatos de archivos de música
 - **Visualización de carátulas**: Muestra las carátulas de los álbumes
+- **Lector biónico**: Librero con libros en PDF y lector tipo Kindle con formato de lectura biónica
+
+## Lector biónico (biblioteca)
+
+Además del modo DJ, Open Beat incluye un lector de libros con **lectura biónica**: la primera parte de cada palabra se muestra en negrita para que la vista salte entre puntos de fijación y el cerebro complete el resto, lo que permite leer más rápido y con menos esfuerzo.
+
+- **Librero** (`/biblioteca`): un estante con tres libros de dominio público en español (Project Gutenberg): *Vida de Lazarillo de Tormes* (anónimo, 1554), *Marianela* (Benito Pérez Galdós, 1878) y *Cuentos de amor, de locura y de muerte* (Horacio Quiroga, 1917). Al tocar un libro se abre el lector; el progreso de lectura se muestra sobre la portada.
+- **Añadir PDF**: el último hueco del estante permite abrir cualquier PDF propio. Se guarda en el navegador (IndexedDB) y aparece en el librero en las siguientes visitas.
+- **Lector** (`/leer/:id`): aspecto tipo Kindle. El texto del PDF se extrae con [pdf.js](https://mozilla.github.io/pdf.js/), se reconstruyen párrafos, títulos y subtítulos (también los cortados entre páginas) y se pagina en pantallas completas capítulo a capítulo. Navegación tocando los bordes, con las flechas del teclado o con la barra de progreso.
+- **Ajustes (Aa)**: activar o desactivar el formato biónico y su intensidad (baja, media, alta), fuente serif o sans, tamaño, interlineado y tema (blanco, sepia, verde, oscuro). La posición de lectura y los ajustes se recuerdan.
+
+Los PDFs de `src/assets/books/` se generan a partir de las ediciones de texto de Project Gutenberg con `node scripts/build-books.js` (requiere red y Playwright con Chromium).
 
 ## Tecnologías utilizadas
 
@@ -22,6 +34,7 @@ Open Beat es una aplicación de DJ moderna e inteligente que utiliza tecnología
   - Howler.js para reproducción de audio
   - Tone.js para síntesis y procesamiento de audio
   - Music-metadata para análisis de metadatos
+- **Lectura**: pdf.js (pdfjs-dist) para extraer el texto de los PDFs
 - **Inteligencia Artificial**:
   - TensorFlow.js para procesamiento de audio con IA
   - Magenta para generación y análisis musical

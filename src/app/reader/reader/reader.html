@@ -1,0 +1,103 @@
+<div class="reader" [attr.data-theme]="settings().theme" [class.chrome-hidden]="!showChrome()"
+     [style.--font-size.px]="settings().fontSize" [style.--line-height]="settings().lineHeight"
+     [class.sans]="settings().font === 'sans'">
+
+  <header class="bar top">
+    <a routerLink="/biblioteca" class="icon-btn" aria-label="Volver a la biblioteca">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="22" height="22" fill="currentColor"><path d="M400-80 0-480l400-400 71 71-329 329 329 329-71 71Z"/></svg>
+    </a>
+    <div class="book-title">
+      <span class="t">{{ book()?.title }}</span>
+      @if (book()?.author) { <span class="a">{{ book()?.author }}</span> }
+    </div>
+    <div class="actions">
+      <button type="button" class="icon-btn bionic" [class.on]="settings().bionic" (click)="toggleBionic()"
+              [attr.aria-pressed]="settings().bionic" title="Lectura biónica">
+        <b>Bi</b>ónico
+      </button>
+      <button type="button" class="icon-btn aa" (click)="showSettings.set(!showSettings())" aria-label="Ajustes de lectura">Aa</button>
+    </div>
+  </header>
+
+  @if (showSettings()) {
+    <div class="settings" role="dialog" aria-label="Ajustes de lectura">
+      <div class="row">
+        <span class="label">Tema</span>
+        <div class="themes">
+          @for (t of themes; track t.id) {
+            <button type="button" class="theme" [attr.data-theme]="t.id" [class.active]="settings().theme === t.id"
+                    (click)="setTheme(t.id)" [title]="t.label">Aa</button>
+          }
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">Fuente</span>
+        <div class="seg">
+          <button type="button" [class.active]="settings().font === 'serif'" (click)="setFont('serif')" style="font-family: 'Literata', Georgia, serif">Serif</button>
+          <button type="button" [class.active]="settings().font === 'sans'" (click)="setFont('sans')" style="font-family: system-ui, sans-serif">Sans</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">Tamaño</span>
+        <div class="stepper">
+          <button type="button" (click)="fontSize(-2)" aria-label="Reducir texto">A−</button>
+          <span>{{ settings().fontSize }}</span>
+          <button type="button" (click)="fontSize(2)" aria-label="Aumentar texto">A+</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">Interlineado</span>
+        <div class="stepper">
+          <button type="button" (click)="lineHeight(-0.1)" aria-label="Menos espacio">−</button>
+          <span>{{ settings().lineHeight }}</span>
+          <button type="button" (click)="lineHeight(0.1)" aria-label="Más espacio">+</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">Lectura biónica</span>
+        <label class="switch">
+          <input type="checkbox" [checked]="settings().bionic" (change)="toggleBionic()" />
+          <span class="track"><span class="knob"></span></span>
+        </label>
+      </div>
+      <div class="row" [class.disabled]="!settings().bionic">
+        <span class="label">Intensidad</span>
+        <div class="seg">
+          @for (f of fixations; track f.value) {
+            <button type="button" [class.active]="settings().fixation === f.value" (click)="setFixation(f.value)" [disabled]="!settings().bionic">{{ f.label }}</button>
+          }
+        </div>
+      </div>
+    </div>
+  }
+
+  <main class="viewport" (click)="onTap($event)">
+    <div class="stage" #stage>
+      <div class="columns" #columns lang="es" [innerHTML]="html()"
+           [style.width.px]="size().w || null" [style.height.px]="size().h || null"
+           [style.columnWidth.px]="size().w || null"
+           [style.transform]="'translateX(' + offset() + 'px)'"></div>
+
+      @if (loading()) {
+        <div class="overlay">
+          <span class="spinner"></span>
+          <span>{{ prepared() > 0 ? 'Preparando libro… ' + prepared() + '%' : 'Abriendo libro…' }}</span>
+        </div>
+      } @else if (error()) {
+        <div class="overlay error">{{ error() }}</div>
+      } @else if (flow().length === 0) {
+        <div class="overlay muted">Página sin texto</div>
+      }
+    </div>
+  </main>
+
+  <footer class="bar bottom">
+    <input class="slider" type="range" min="1" [max]="totalPages() || 1" [value]="page()" (change)="onSlider($event)"
+           [style.--p.%]="percent()" aria-label="Ir a página" />
+    <div class="status">
+      <button type="button" class="nav" (click)="prev()" [disabled]="isFirst()" aria-label="Página anterior">‹</button>
+      <span>Página {{ page() }} de {{ totalPages() || '…' }} · {{ percent() }}%</span>
+      <button type="button" class="nav" (click)="next()" [disabled]="isLast()" aria-label="Página siguiente">›</button>
+    </div>
+  </footer>
+</div>

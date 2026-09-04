@@ -1,0 +1,72 @@
+<div class="room">
+  <header class="top">
+    <a routerLink="/" class="back" aria-label="Volver a Open Beat">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="22" height="22" fill="currentColor"><path d="M400-80 0-480l400-400 71 71-329 329 329 329-71 71Z"/></svg>
+      Open<span>beat</span>
+    </a>
+    <h1>Mi biblioteca</h1>
+    <p class="hint">Toca un libro para leerlo con formato biónico</p>
+  </header>
+
+  <section class="bookcase" aria-label="Librero">
+    @for (row of shelves(); track $index) {
+      <div class="shelf">
+        <div class="books">
+          @for (item of row; track item.book.id) {
+            <button class="book" type="button" (click)="open(item.book)"
+                    [style.--c1]="item.book.cover.from" [style.--c2]="item.book.cover.to"
+                    [style.--accent]="item.book.cover.accent" [style.--ink]="item.book.cover.ink"
+                    [attr.aria-label]="'Leer ' + item.book.title">
+              <span class="spine"></span>
+              <span class="cover">
+                <span class="frame">
+                  <span class="title">{{ item.book.title }}</span>
+                  <span class="rule"></span>
+                  <span class="author">{{ item.book.author }}</span>
+                  @if (item.book.year) { <span class="year">{{ item.book.year }}</span> }
+                </span>
+                @if (item.percent > 0) {
+                  <span class="progress"><i [style.width.%]="item.percent"></i><em>{{ item.percent }}%</em></span>
+                }
+              </span>
+              <span class="pages"></span>
+              @if (item.book.local) {
+                <span class="remove" role="button" tabindex="0" (click)="remove($event, item.book)"
+                      (keydown.enter)="remove($event, item.book)" aria-label="Quitar libro">×</span>
+              }
+            </button>
+          }
+          @if ($last) {
+            <button class="book add" type="button" (click)="pickFile()" [disabled]="busy()" aria-label="Añadir un PDF">
+              <span class="spine"></span>
+              <span class="cover">
+                <span class="frame">
+                  <span class="plus">{{ busy() ? '…' : '+' }}</span>
+                  <span class="title">{{ busy() ? 'Añadiendo' : 'Añadir PDF' }}</span>
+                  <span class="author">Abre tu propio libro</span>
+                </span>
+              </span>
+              <span class="pages"></span>
+            </button>
+          }
+        </div>
+        <div class="plank"></div>
+      </div>
+    }
+  </section>
+
+  @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+
+  <section class="demo">
+    <div class="demo-head">
+      <h2>¿Qué es la lectura biónica?</h2>
+      <label class="switch">
+        <input type="checkbox" [checked]="demoBionic()" (change)="demoBionic.set(!demoBionic())" />
+        <span>Activar</span>
+      </label>
+    </div>
+    <p class="sample" [class.plain]="!demoBionic()" [innerHTML]="demoHtml()"></p>
+  </section>
+
+  <input #fileInput type="file" accept="application/pdf,.pdf" hidden (change)="onFile($event)" />
+</div>
