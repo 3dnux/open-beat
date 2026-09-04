@@ -1,4 +1,4 @@
-<div class="reader" [attr.data-theme]="settings().theme" [class.chrome-hidden]="!showChrome()"
+<div class="reader" #reader [attr.data-theme]="settings().theme" [class.chrome-hidden]="!showChrome()"
      [style.--font-size.px]="settings().fontSize" [style.--line-height]="settings().lineHeight"
      [class.sans]="settings().font === 'sans'" [class.lexend]="settings().font === 'lexend'" [class.atkinson]="settings().font === 'atkinson'">
 
@@ -90,14 +90,29 @@
 
   @if (showToc()) {
     <nav class="toc" aria-label="Índice">
-      <h3>Índice</h3>
-      @for (e of toc(); track e.index) {
-        <button type="button" [class.l1]="e.level === 1" [class.l2]="e.level === 2" [class.current]="e.index === currentChapter()" (click)="goToChapter(e.index)">
-          <span class="t">{{ e.title }}@if (e.subtitle) {<span class="s">{{ e.subtitle }}</span>}</span>
-          <span class="pg">{{ e.page }}</span>
-        </button>
-      } @empty {
-        <p class="empty">Este libro no tiene capítulos detectados.</p>
+      <div class="tabs">
+        <button type="button" [class.active]="tocTab() === 'chapters'" (click)="tocTab.set('chapters')">Capítulos</button>
+        <button type="button" [class.active]="tocTab() === 'notes'" (click)="tocTab.set('notes')">Notas</button>
+      </div>
+      @if (tocTab() === 'chapters') {
+        @for (e of toc(); track e.index) {
+          <button type="button" [class.l1]="e.level === 1" [class.l2]="e.level === 2" [class.current]="e.index === currentChapter()" (click)="goToChapter(e.index)">
+            <span class="t">{{ e.title }}@if (e.subtitle) {<span class="s">{{ e.subtitle }}</span>}</span>
+            <span class="pg">{{ e.page }}</span>
+          </button>
+        } @empty {
+          <p class="empty">Este libro no tiene capítulos detectados.</p>
+        }
+      } @else {
+        @for (a of annotations(); track a.id) {
+          <button type="button" class="note-item" (click)="goToNote(a.index)">
+            <span class="dot" [class]="'dot ' + a.color"></span>
+            <span class="t">{{ a.text.length > 140 ? a.text.slice(0, 140) + '…' : a.text }}@if (a.note) {<span class="n">{{ a.note }}</span>}</span>
+            <span class="pg">{{ flow()[a.index]?.page }}</span>
+          </button>
+        } @empty {
+          <p class="empty">Selecciona texto para subrayarlo o añadir una nota.</p>
+        }
       }
     </nav>
   }
@@ -152,6 +167,45 @@
     </div>
     <div class="eta">{{ eta() }}</div>
   </footer>
+
+  @if ((selection() || activeHl()) && !noteOpen()) {
+    <div class="pop" role="toolbar" #popover [style.left.px]="popPos()?.left ?? -9999" [style.top.px]="popPos()?.top ?? 0">
+      @for (c of colors; track c.id) {
+        <button type="button" [class]="'swatch ' + c.id + (activeHl()?.color === c.id ? ' active' : '')" [title]="c.label" [attr.aria-label]="c.label"
+                (click)="activeHl() ? setHighlightColor(c.id) : addHighlight(c.id)"></button>
+      }
+      <button type="button" (click)="openNote()">{{ activeHl()?.note ? 'Editar nota' : 'Nota' }}</button>
+      @if (selection()) { <button type="button" (click)="copySelection()">Copiar</button> }
+      @if (isSingleWord(selection()?.text ?? activeHl()?.text ?? 'a b')) { <button type="button" (click)="define()">Definir</button> }
+      @if (activeHl()) { <button type="button" class="danger" (click)="removeHighlight()">Quitar</button> }
+      @if (activeHl()?.note) { <div class="note-text">{{ activeHl()?.note }}</div> }
+    </div>
+  }
+
+  @if (noteOpen() && activeHl(); as a) {
+    <div class="note-dlg" role="dialog" aria-label="Nota">
+      <h3>Nota</h3>
+      <p class="quote">«{{ a.text }}»</p>
+      <textarea #noteBox [value]="noteDraft()" placeholder="Escribe tu nota…"></textarea>
+      <div class="actions">
+        <button type="button" (click)="cancelNote()">Cancelar</button>
+        <button type="button" class="primary" (click)="saveNote(noteBox.value)">Guardar</button>
+      </div>
+    </div>
+  }
+
+  @if (dict(); as d) {
+    <div class="dict" role="dialog" aria-label="Diccionario">
+      <div class="dict-head">
+        <b>{{ d.entry?.word ?? d.word }}</b>
+        @if (d.entry) { <a [href]="d.entry.url" target="_blank" rel="noopener">Wikcionario ↗</a> }
+        <button type="button" (click)="closeDict()" aria-label="Cerrar">✕</button>
+      </div>
+      @if (d.loading) { <p class="msg">Buscando…</p> }
+      @else if (d.error) { <p class="msg">{{ d.error }}</p> }
+      @else { <ol>@for (x of d.entry!.definitions; track $index) { <li>{{ x }}</li> }</ol> }
+    </div>
+  }
 
   <div class="warmth" [style.opacity]="settings().warmth / 100 * 0.45"></div>
 

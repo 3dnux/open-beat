@@ -27,6 +27,8 @@ Además del modo DJ, Open Beat incluye un lector de libros con **lectura biónic
 - **Tiempo restante**: estimación de minutos para acabar el capítulo y el libro, a partir del ritmo real de lectura medido con cada página.
 - **Leer en voz alta**: síntesis de voz del navegador con resaltado del párrafo y de la palabra que se está leyendo, velocidad y voz configurables.
 - **Modo ráfaga**: lectura palabra a palabra (RSVP) con la letra de fijación resaltada y velocidad ajustable de 100 a 800 palabras por minuto; al salir, el lector queda donde se detuvo.
+- **Subrayados y notas**: al seleccionar texto (arrastrando con el ratón o con pulsación larga en el móvil) aparece una barra para subrayar en cuatro colores, añadir una nota o copiar. Tocar un subrayado permite cambiarle el color, editar la nota o quitarlo. La pestaña "Notas" del índice lista todos y salta a cada uno. Se guardan en el navegador por libro.
+- **Diccionario**: con una sola palabra seleccionada, "Definir" consulta el Wikcionario en español y muestra sus acepciones (requiere conexión).
 - La pantalla no se apaga mientras se lee (Wake Lock) en los navegadores que lo permiten.
 
 **Versión autónoma (un solo archivo).** `node scripts/build-standalone.mjs` genera `dist/standalone/librero-bionico.html`: el librero y el lector sin Angular, con el texto de los tres libros ya extraído y pdf.js incrustado, listo para publicar en cualquier sitio estático o abrir directamente desde el disco.

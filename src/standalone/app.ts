@@ -12,6 +12,8 @@ import { ReadingSpeed, countWords, formatMinutes } from '../app/reader/reading-s
 import { ReadAloud } from '../app/reader/speech';
 import { Rsvp, RsvpWord, rsvpWords } from '../app/reader/rsvp';
 import { highlightRange, rangeForText } from '../app/reader/text-range';
+import { Annotation, AnnotationStore, HIGHLIGHT_COLORS, HighlightColor, SelectionInfo, markupWithHighlights, selectionInfo } from '../app/reader/annotations';
+import { DictionaryEntry, lookup } from '../app/reader/dictionary';
 
 interface StoredBook {
   id: string;
@@ -311,6 +313,13 @@ class Reader {
   private ttsMsg = '';
   private rsvp?: Rsvp;
   private wakeLock?: { release(): Promise<void> };
+  private readonly notes: AnnotationStore;
+  private tocTab: 'chapters' | 'notes' = 'chapters';
+  private selection: SelectionInfo | null = null;
+  private activeHl: string | null = null;
+  private dict: { word: string; entry?: DictionaryEntry; error?: string; loading?: boolean } | null = null;
+  private selTimer?: ReturnType<typeof setTimeout>;
+  private readonly onSelection = () => { clearTimeout(this.selTimer); this.selTimer = setTimeout(() => this.selectionChanged(), 250); };
   private readonly onKey = (e: KeyboardEvent) => this.key(e);
   private readonly onVisibility = () => { if (document.hidden) this.speed.pause(); else this.requestWakeLock(); };
 
@@ -318,6 +327,7 @@ class Reader {
     this.flow = book.flow;
     this.chunks = buildChunks(this.flow);
     this.toc = buildToc(this.flow);
+    this.notes = new AnnotationStore(book.id);
   }
 
   mount(): void {
@@ -352,6 +362,8 @@ class Reader {
     </div>
     <div class="eta"></div>
   </footer>
+  <div class="pop-slot"></div>
+  <div class="dict-slot"></div>
   <div class="warmth"></div>
   <div class="rsvp-slot"></div>
 </div>`;
@@ -364,6 +376,7 @@ class Reader {
     this.el.addEventListener('change', e => this.change(e));
     window.addEventListener('keydown', this.onKey);
     document.addEventListener('visibilitychange', this.onVisibility);
+    document.addEventListener('selectionchange', this.onSelection);
 
     const progress = this.library.progress(this.book.id);
     const index = progress ? Math.min(Math.max(0, progress.index ?? this.indexOfPage(progress.page)), this.flow.length - 1) : 0;
@@ -395,6 +408,8 @@ class Reader {
     this.speed.pause();
     this.wakeLock?.release().catch(() => undefined);
     document.removeEventListener('visibilitychange', this.onVisibility);
+    document.removeEventListener('selectionchange', this.onSelection);
+    clearTimeout(this.selTimer);
     this.pageTurn?.detach();
     window.removeEventListener('keydown', this.onKey);
     this.observer?.disconnect();
@@ -414,7 +429,7 @@ class Reader {
 
   /* --- events --- */
   private key(e: KeyboardEvent): void {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
     if (this.rsvp) {
       if (e.key === 'Escape') this.closeRsvp();
       else if (e.key === ' ') { this.rsvp.playing ? this.rsvp.pause() : this.rsvp.play(); this.renderRsvpControls(); e.preventDefault(); }
@@ -423,7 +438,7 @@ class Reader {
     switch (e.key) {
       case 'ArrowRight': case 'PageDown': case ' ': this.next(); e.preventDefault(); break;
       case 'ArrowLeft': case 'PageUp': this.prev(); e.preventDefault(); break;
-      case 'Escape': this.toggleSettings(false); this.toggleToc(false); break;
+      case 'Escape': this.toggleSettings(false); this.toggleToc(false); this.closePops(); break;
     }
   }
 
@@ -451,15 +466,27 @@ class Reader {
     const actEl = target.closest<HTMLElement>('[data-act]');
     const act = actEl?.dataset['act'];
     if (act && !(actEl instanceof HTMLInputElement) && !(actEl instanceof HTMLSelectElement)) { this.action(act, actEl!); return; }
-    if (target.closest('.settings, .toc, .tts, .rsvp')) return;
+    if (target.closest('.settings, .toc, .tts, .rsvp, .pop, .note-dlg, .dict')) return;
+    const mark = target.closest<HTMLElement>('mark.hl');
+    if (mark) { this.openHighlight(mark.dataset['h']!, mark.getBoundingClientRect()); return; }
+    if (this.activeHl || this.dict) { this.closePops(); return; }
     if (!target.closest('.viewport')) return;
+    if (!document.getSelection()?.isCollapsed) return;
     if (this.showSettings || this.showToc) { this.toggleSettings(false); this.toggleToc(false); return; }
+    // With a mouse, a double click selects a word: hold the single tap briefly so it can be cancelled.
+    clearTimeout(this.tapTimer);
+    if (e.detail > 1) return;
     const r = this.stage.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width;
-    if (x < 0.3) this.prev();
-    else if (x > 0.7) this.next();
-    else { this.showChrome = !this.showChrome; this.el.classList.toggle('chrome-hidden', !this.showChrome); }
+    const run = () => {
+      if (!document.getSelection()?.isCollapsed) return;
+      if (x < 0.3) this.prev();
+      else if (x > 0.7) this.next();
+      else { this.showChrome = !this.showChrome; this.el.classList.toggle('chrome-hidden', !this.showChrome); }
+    };
+    if (matchMedia('(hover: hover)').matches) this.tapTimer = setTimeout(run, 260); else run();
   }
+  private tapTimer?: ReturnType<typeof setTimeout>;
 
   private action(act: string, el: HTMLElement): void {
     const s = this.library.settings;
@@ -479,6 +506,17 @@ class Reader {
       case 'rsvp-back': this.rsvp?.back(); break;
       case 'rsvp-step': if (this.rsvp) { this.rsvp.wpm = Math.min(800, Math.max(100, this.rsvp.wpm + Number(el.dataset['value']))); this.renderRsvpControls(); } break;
       case 'fullscreen': this.toggleFullscreen(); break;
+      case 'toc-tab': this.tocTab = el.dataset['value'] as 'chapters' | 'notes'; this.renderToc(); break;
+      case 'note-go': this.toggleToc(false); this.goToIndex(Number(el.dataset['value'])); break;
+      case 'hl-add': this.addHighlight(el.dataset['value'] as HighlightColor); break;
+      case 'hl-color': if (this.activeHl) { this.notes.update(this.activeHl, { color: el.dataset['value'] as HighlightColor }); this.refreshHighlights(); this.renderPop(); } break;
+      case 'hl-note': this.openNote(); break;
+      case 'hl-remove': if (this.activeHl) { this.notes.remove(this.activeHl); this.closePops(); this.refreshHighlights(); } break;
+      case 'copy': if (this.selection) navigator.clipboard?.writeText(this.selection.text).catch(() => undefined); this.closePops(); break;
+      case 'define': this.define(this.selection?.text ?? this.activeText()); break;
+      case 'dict-close': this.dict = null; this.renderDict(); break;
+      case 'note-save': this.saveNote(); break;
+      case 'note-cancel': this.closeNote(); break;
       case 'bionic': this.anchor(); this.library.updateSettings({ bionic: !s.bionic }); this.applyTypography(); break;
       case 'theme': this.library.updateSettings({ theme: el.dataset['value'] as ReaderTheme }); this.applyTypography(); break;
       case 'font': this.anchor(); this.library.updateSettings({ font: el.dataset['value'] as ReaderFont }); this.applyTypography(); break;
@@ -549,13 +587,14 @@ class Reader {
     const s = this.library.settings;
     const c = this.chunks[index];
     if (!c) return '';
-    const key = `${index}|${s.bionic ? s.fixation : 'plain'}`;
+    const key = `${index}|${s.bionic ? s.fixation : 'plain'}|${this.notes.version}`;
     let html = this.htmlCache.get(key);
     if (html === undefined) {
+      const render = (t: string) => (s.bionic ? toBionicHtml(t, s.fixation) : toPlainHtml(t));
       const parts: string[] = [];
       for (let i = c.start; i < c.end; i++) {
         const p = this.flow[i];
-        parts.push(`<${p.kind} data-i="${i}">${s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text)}</${p.kind}>`);
+        parts.push(`<${p.kind} data-i="${i}">${markupWithHighlights(p.text, this.notes.forParagraph(i), render)}</${p.kind}>`);
       }
       html = parts.join('');
       if (this.htmlCache.size > 12) this.htmlCache.clear();
@@ -634,11 +673,119 @@ class Reader {
     const slot = $('.toc-slot', this.el);
     if (!this.showToc) { slot.innerHTML = ''; return; }
     const current = chapterStart(this.toc, this.index);
-    slot.innerHTML = `<nav class="toc" aria-label="Índice"><h3>Índice</h3>${
-      this.toc.length ? this.toc.map(e => `<button type="button" class="l${e.level}${e.index === current ? ' current' : ''}" data-act="toc-go" data-value="${e.index}">
-        <span class="t">${esc(e.title)}${e.subtitle ? `<span class="s">${esc(e.subtitle)}</span>` : ''}</span><span class="pg">${e.page}</span></button>`).join('')
-      : '<p class="empty">Este libro no tiene capítulos detectados.</p>'}</nav>`;
+    const tabs = `<div class="tabs"><button type="button" class="${this.tocTab === 'chapters' ? 'active' : ''}" data-act="toc-tab" data-value="chapters">Capítulos</button><button type="button" class="${this.tocTab === 'notes' ? 'active' : ''}" data-act="toc-tab" data-value="notes">Notas</button></div>`;
+    const body = this.tocTab === 'chapters'
+      ? (this.toc.length ? this.toc.map(e => `<button type="button" class="l${e.level}${e.index === current ? ' current' : ''}" data-act="toc-go" data-value="${e.index}">
+          <span class="t">${esc(e.title)}${e.subtitle ? `<span class="s">${esc(e.subtitle)}</span>` : ''}</span><span class="pg">${e.page}</span></button>`).join('')
+        : '<p class="empty">Este libro no tiene capítulos detectados.</p>')
+      : (this.notes.all().length ? this.notes.all().map(a => `<button type="button" class="note-item" data-act="note-go" data-value="${a.index}">
+          <span class="dot ${a.color}"></span><span class="t">${esc(a.text.length > 140 ? a.text.slice(0, 140) + '…' : a.text)}${a.note ? `<span class="n">${esc(a.note)}</span>` : ''}</span><span class="pg">${this.flow[a.index]?.page ?? ''}</span></button>`).join('')
+        : '<p class="empty">Selecciona texto para subrayarlo o añadir una nota.</p>');
+    slot.innerHTML = `<nav class="toc" aria-label="Índice">${tabs}${body}</nav>`;
     slot.querySelector('.current')?.scrollIntoView({ block: 'center' });
+  }
+
+  /* --- highlights, notes, dictionary --- */
+  private selectionChanged(): void {
+    if (this.rsvp) return;
+    const info = selectionInfo(this.columns);
+    this.selection = info;
+    if (info) this.activeHl = null;
+    this.renderPop();
+  }
+  private refreshHighlights(): void {
+    const scroll = this.screen;
+    this.pending = { type: 'screen', screen: scroll };
+    this.renderChunk();
+    if (this.showToc) this.renderToc();
+  }
+  private addHighlight(color: HighlightColor): void {
+    const sel = this.selection;
+    if (!sel) return;
+    this.notes.add({ index: sel.index, start: sel.start, end: sel.end, text: sel.text, color });
+    document.getSelection()?.removeAllRanges();
+    this.selection = null;
+    this.closePops();
+    this.refreshHighlights();
+  }
+  private openHighlight(id: string, rect: DOMRect): void {
+    document.getSelection()?.removeAllRanges();
+    this.selection = null;
+    this.activeHl = id;
+    this.popRect = rect;
+    this.renderPop();
+  }
+  private activeText(): string { return this.activeHl ? this.notes.get(this.activeHl)?.text ?? '' : ''; }
+  private popRect: DOMRect | null = null;
+  private closePops(): void {
+    this.activeHl = null;
+    this.selection = null;
+    this.dict = null;
+    this.renderPop();
+    this.renderDict();
+  }
+  private renderPop(): void {
+    const slot = $('.pop-slot', this.el);
+    const sel = this.selection;
+    const hl = this.activeHl ? this.notes.get(this.activeHl) : undefined;
+    if (!sel && !hl) { slot.innerHTML = ''; return; }
+    const rect = sel ? sel.rect : this.popRect!;
+    const swatches = HIGHLIGHT_COLORS.map(c => `<button type="button" class="swatch ${c.id}${hl?.color === c.id ? ' active' : ''}" data-act="${hl ? 'hl-color' : 'hl-add'}" data-value="${c.id}" title="${c.label}" aria-label="${c.label}"></button>`).join('');
+    const single = sel ? !/\s/.test(sel.text.trim()) : false;
+    slot.innerHTML = `<div class="pop" role="toolbar">${swatches}
+      <button type="button" data-act="hl-note">${hl?.note ? 'Editar nota' : 'Nota'}</button>
+      ${sel ? '<button type="button" data-act="copy">Copiar</button>' : ''}
+      ${(sel && single) || (hl && !/\s/.test(hl.text.trim())) ? '<button type="button" data-act="define">Definir</button>' : ''}
+      ${hl ? '<button type="button" class="danger" data-act="hl-remove">Quitar</button>' : ''}
+      ${hl?.note ? `<div class="note-text">${esc(hl.note)}</div>` : ''}</div>`;
+    const pop = $('.pop', slot);
+    const host = this.el.getBoundingClientRect();
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    let left = rect.left - host.left + rect.width / 2 - w / 2;
+    left = Math.max(8, Math.min(left, host.width - w - 8));
+    let top = rect.top - host.top - h - 10;
+    if (top < 60) top = rect.bottom - host.top + 10;
+    pop.style.left = `${left}px`; pop.style.top = `${top}px`;
+  }
+  private openNote(): void {
+    if (this.selection && !this.activeHl) {
+      const a = this.notes.add({ index: this.selection.index, start: this.selection.start, end: this.selection.end, text: this.selection.text, color: 'yellow' });
+      document.getSelection()?.removeAllRanges();
+      this.selection = null;
+      this.activeHl = a.id;
+      this.refreshHighlights();
+    }
+    const hl = this.activeHl ? this.notes.get(this.activeHl) : undefined;
+    if (!hl) return;
+    $('.pop-slot', this.el).innerHTML = `<div class="note-dlg" role="dialog" aria-label="Nota"><h3>Nota</h3><p class="quote">«${esc(hl.text)}»</p>
+      <textarea data-note placeholder="Escribe tu nota…">${esc(hl.note ?? '')}</textarea>
+      <div class="actions"><button type="button" data-act="note-cancel">Cancelar</button><button type="button" class="primary" data-act="note-save">Guardar</button></div></div>`;
+    $<HTMLTextAreaElement>('[data-note]', this.el).focus();
+  }
+  private saveNote(): void {
+    const ta = this.el.querySelector<HTMLTextAreaElement>('[data-note]');
+    if (this.activeHl && ta) this.notes.update(this.activeHl, { note: ta.value.trim() || undefined });
+    this.closeNote();
+    this.refreshHighlights();
+  }
+  private closeNote(): void { this.activeHl = null; this.renderPop(); }
+  private async define(text: string): Promise<void> {
+    if (!text) return;
+    this.activeHl = null; this.selection = null; this.renderPop();
+    document.getSelection()?.removeAllRanges();
+    this.dict = { word: text, loading: true };
+    this.renderDict();
+    try { this.dict = { word: text, entry: await lookup(text) }; }
+    catch (e) { this.dict = { word: text, error: e instanceof Error ? e.message : 'No se pudo consultar.' }; }
+    this.renderDict();
+  }
+  private renderDict(): void {
+    const slot = $('.dict-slot', this.el);
+    const d = this.dict;
+    if (!d) { slot.innerHTML = ''; return; }
+    slot.innerHTML = `<div class="dict" role="dialog" aria-label="Diccionario"><div class="dict-head"><b>${esc(d.entry?.word ?? d.word)}</b>
+      ${d.entry ? `<a href="${esc(d.entry.url)}" target="_blank" rel="noopener">Wikcionario ↗</a>` : ''}<button type="button" data-act="dict-close" aria-label="Cerrar">✕</button></div>
+      ${d.loading ? '<p class="msg">Buscando…</p>' : d.error ? `<p class="msg">${esc(d.error)}</p>` : `<ol>${d.entry!.definitions.map(x => `<li>${esc(x)}</li>`).join('')}</ol>`}</div>`;
   }
 
   /* --- read aloud --- */

@@ -14,6 +14,8 @@ import { ReadingSpeed, countWords, formatMinutes } from '../reading-speed';
 import { ReadAloud } from '../speech';
 import { Rsvp, RsvpWord, rsvpWords } from '../rsvp';
 import { highlightRange, rangeForText } from '../text-range';
+import { Annotation, AnnotationStore, HIGHLIGHT_COLORS, HighlightColor, SelectionInfo, markupWithHighlights, selectionInfo } from '../annotations';
+import { DictionaryEntry, lookup } from '../dictionary';
 
 /** Horizontal gap between screens (CSS columns). */
 const GAP = 48;
@@ -74,14 +76,16 @@ export class Reader implements OnInit, OnDestroy {
     const s = this.settings();
     const c = this.chunks()[index];
     if (!c) return '';
-    const key = `${index}|${s.bionic ? s.fixation : 'plain'}`;
+    const notes = this.notes();
+    const key = `${index}|${s.bionic ? s.fixation : 'plain'}|${this.notesVersion()}`;
     let html = this.htmlCache.get(key);
     if (html === undefined) {
       const flow = this.flow();
+      const render = (t: string) => (s.bionic ? toBionicHtml(t, s.fixation) : toPlainHtml(t));
       const parts: string[] = [];
       for (let i = c.start; i < c.end; i++) {
         const p = flow[i];
-        const inner = s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text);
+        const inner = markupWithHighlights(p.text, notes ? notes.forParagraph(i) : [], render);
         parts.push(`<${p.kind} data-i="${i}">${inner}</${p.kind}>`);
       }
       html = parts.join('');
@@ -124,6 +128,24 @@ export class Reader implements OnInit, OnDestroy {
     const book = this.speed.minutesFor(this.wordsOf(from, flow.length));
     return `≈ ${formatMinutes(chapter)} para acabar el capítulo · ${formatMinutes(book)} para acabar el libro`;
   });
+
+  /* ---- highlights, notes, dictionary ---- */
+  readonly notes = signal<AnnotationStore | undefined>(undefined);
+  readonly notesVersion = signal(0);
+  readonly annotations = computed<Annotation[]>(() => { this.notesVersion(); return this.notes()?.all() ?? []; });
+  readonly tocTab = signal<'chapters' | 'notes'>('chapters');
+  readonly selection = signal<SelectionInfo | null>(null);
+  readonly activeHl = signal<Annotation | null>(null);
+  readonly popPos = signal<{ left: number; top: number } | null>(null);
+  readonly noteOpen = signal(false);
+  readonly noteDraft = signal('');
+  readonly dict = signal<{ word: string; entry?: DictionaryEntry; error?: string; loading?: boolean } | null>(null);
+  readonly colors = HIGHLIGHT_COLORS;
+  private popRect: DOMRect | null = null;
+  private selTimer?: ReturnType<typeof setTimeout>;
+  private readonly onSelection = () => { clearTimeout(this.selTimer); this.selTimer = setTimeout(() => this.selectionChanged(), 250); };
+  readonly popover = viewChild<ElementRef<HTMLElement>>('popover');
+  readonly readerEl = viewChild<ElementRef<HTMLElement>>('reader');
 
   /* ---- read aloud ---- */
   readonly ttsOpen = signal(false);
@@ -202,8 +224,10 @@ export class Reader implements OnInit, OnDestroy {
       return;
     }
     this.book.set(book);
+    this.notes.set(new AnnotationStore(book.id));
     this.observeSize();
     document.addEventListener('visibilitychange', this.onVisibility);
+    document.addEventListener('selectionchange', this.onSelection);
     document.addEventListener('fullscreenchange', this.onFullscreen);
     try {
       const doc = await this.pdf.open(book.id, book.src ?? book.data!);
@@ -231,6 +255,8 @@ export class Reader implements OnInit, OnDestroy {
     this.wakeLock?.release().catch(() => undefined);
     document.removeEventListener('visibilitychange', this.onVisibility);
     document.removeEventListener('fullscreenchange', this.onFullscreen);
+    document.removeEventListener('selectionchange', this.onSelection);
+    clearTimeout(this.selTimer);
     this.pageTurn?.detach();
     this.resizeObserver?.disconnect();
     clearTimeout(this.saveTimer);
@@ -242,7 +268,7 @@ export class Reader implements OnInit, OnDestroy {
 
   @HostListener('window:keydown', ['$event'])
   onKey(event: KeyboardEvent): void {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return;
     if (this.rsvpOpen()) {
       if (event.key === 'Escape') this.closeRsvp();
       else if (event.key === ' ') { this.rsvpToggle(); event.preventDefault(); }
@@ -251,19 +277,32 @@ export class Reader implements OnInit, OnDestroy {
     switch (event.key) {
       case 'ArrowRight': case 'PageDown': case ' ': this.next(); event.preventDefault(); break;
       case 'ArrowLeft': case 'PageUp': this.prev(); event.preventDefault(); break;
-      case 'Escape': this.showSettings.set(false); this.showToc.set(false); break;
+      case 'Escape': this.showSettings.set(false); this.showToc.set(false); this.closePops(); break;
     }
   }
 
   onTap(event: MouseEvent): void {
+    const target = event.target as HTMLElement;
+    const mark = target.closest<HTMLElement>('mark.hl');
+    if (mark) { this.openHighlight(mark.dataset['h']!, mark.getBoundingClientRect()); return; }
+    if (this.activeHl() || this.dict() || this.selection()) { this.closePops(); return; }
+    if (!document.getSelection()?.isCollapsed) return;
     if (this.showSettings() || this.showToc()) { this.showSettings.set(false); this.showToc.set(false); return; }
     const el = this.stage()?.nativeElement;
     if (!el) return;
+    // With a mouse, a double click selects a word: hold the single tap briefly so it can be cancelled.
+    clearTimeout(this.tapTimer);
+    if (event.detail > 1) return;
     const x = (event.clientX - el.getBoundingClientRect().left) / el.clientWidth;
-    if (x < 0.3) this.prev();
-    else if (x > 0.7) this.next();
-    else this.showChrome.update(v => !v);
+    const run = () => {
+      if (!document.getSelection()?.isCollapsed) return;
+      if (x < 0.3) this.prev();
+      else if (x > 0.7) this.next();
+      else this.showChrome.update(v => !v);
+    };
+    if (matchMedia('(hover: hover)').matches) this.tapTimer = setTimeout(run, 260); else run();
   }
+  private tapTimer?: ReturnType<typeof setTimeout>;
 
   next(): void { this.turn(1); }
   prev(): void { this.turn(-1); }
@@ -382,6 +421,115 @@ export class Reader implements OnInit, OnDestroy {
     highlightRange('tts-word', null);
     this.columnsEl()?.querySelectorAll('.speaking').forEach(e => e.classList.remove('speaking'));
   }
+
+  /* ---- highlights, notes, dictionary ---- */
+  private selectionChanged(): void {
+    if (this.rsvpOpen()) return;
+    const root = this.columnsEl();
+    const info = root ? selectionInfo(root) : null;
+    this.selection.set(info);
+    if (info) { this.activeHl.set(null); this.popRect = info.rect; this.placePopover(); }
+    else if (!this.activeHl()) this.popPos.set(null);
+  }
+  private placePopover(): void {
+    // The popover renders on the next change detection; position it once it exists.
+    setTimeout(() => {
+      const pop = this.popover()?.nativeElement;
+      const host = this.readerEl()?.nativeElement;
+      const rect = this.popRect;
+      if (!pop || !host || !rect) return;
+      const hb = host.getBoundingClientRect();
+      const w = pop.offsetWidth, h = pop.offsetHeight;
+      const left = Math.max(8, Math.min(rect.left - hb.left + rect.width / 2 - w / 2, hb.width - w - 8));
+      let top = rect.top - hb.top - h - 10;
+      if (top < 60) top = rect.bottom - hb.top + 10;
+      this.popPos.set({ left, top });
+    });
+  }
+  private refreshHighlights(): void {
+    this.pending = { type: 'screen', screen: this.screen() };
+    this.notesVersion.update(n => n + 1);
+  }
+  addHighlight(color: HighlightColor): void {
+    const sel = this.selection();
+    const store = this.notes();
+    if (!sel || !store) return;
+    store.add({ index: sel.index, start: sel.start, end: sel.end, text: sel.text, color });
+    document.getSelection()?.removeAllRanges();
+    this.closePops();
+    this.refreshHighlights();
+  }
+  private openHighlight(id: string, rect: DOMRect): void {
+    const a = this.notes()?.get(id);
+    if (!a) return;
+    document.getSelection()?.removeAllRanges();
+    this.selection.set(null);
+    this.activeHl.set(a);
+    this.popRect = rect;
+    this.placePopover();
+  }
+  setHighlightColor(color: HighlightColor): void {
+    const a = this.activeHl();
+    if (!a) return;
+    this.notes()?.update(a.id, { color });
+    this.activeHl.set({ ...a, color });
+    this.refreshHighlights();
+  }
+  removeHighlight(): void {
+    const a = this.activeHl();
+    if (!a) return;
+    this.notes()?.remove(a.id);
+    this.closePops();
+    this.refreshHighlights();
+  }
+  copySelection(): void {
+    const sel = this.selection();
+    if (sel) navigator.clipboard?.writeText(sel.text).catch(() => undefined);
+    this.closePops();
+  }
+  isSingleWord(text: string): boolean { return !/\s/.test(text.trim()); }
+  openNote(): void {
+    const sel = this.selection();
+    const store = this.notes();
+    if (sel && !this.activeHl() && store) {
+      const a = store.add({ index: sel.index, start: sel.start, end: sel.end, text: sel.text, color: 'yellow' });
+      document.getSelection()?.removeAllRanges();
+      this.selection.set(null);
+      this.activeHl.set(a);
+      this.refreshHighlights();
+    }
+    const a = this.activeHl();
+    if (!a) return;
+    this.noteDraft.set(a.note ?? '');
+    this.noteOpen.set(true);
+  }
+  saveNote(value: string): void {
+    const a = this.activeHl();
+    if (a) this.notes()?.update(a.id, { note: value.trim() || undefined });
+    this.noteOpen.set(false);
+    this.activeHl.set(null);
+    this.popPos.set(null);
+    this.refreshHighlights();
+  }
+  cancelNote(): void { this.noteOpen.set(false); this.activeHl.set(null); this.popPos.set(null); }
+  closePops(): void {
+    this.activeHl.set(null);
+    this.selection.set(null);
+    this.popPos.set(null);
+    this.noteOpen.set(false);
+    this.dict.set(null);
+  }
+  async define(): Promise<void> {
+    const text = this.selection()?.text ?? this.activeHl()?.text ?? '';
+    if (!text) return;
+    document.getSelection()?.removeAllRanges();
+    this.activeHl.set(null); this.selection.set(null); this.popPos.set(null);
+    this.dict.set({ word: text, loading: true });
+    try { this.dict.set({ word: text, entry: await lookup(text) }); }
+    catch (e) { this.dict.set({ word: text, error: e instanceof Error ? e.message : 'No se pudo consultar.' }); }
+  }
+  closeDict(): void { this.dict.set(null); }
+  goToNote(index: number): void { this.showToc.set(false); this.goToIndex(index); }
 
   /* ---- burst mode ---- */
   openRsvp(): void {

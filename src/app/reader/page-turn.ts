@@ -112,7 +112,9 @@ export class PageTurn {
     this.velocity = 0;
     this.dragging = false;
     this.ignoreDrag = false;
-    try { this.host.stage.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    this.swallowClick = false;
+    // Capture touch and pen so the slide keeps tracking outside the stage; a mouse must stay free to select text.
+    if (e.pointerType !== 'mouse') { try { this.host.stage.setPointerCapture(e.pointerId); } catch { /* ignore */ } }
   }
 
   private move(e: PointerEvent): void {
@@ -127,6 +129,8 @@ export class PageTurn {
     if (!this.dragging) {
       if (this.ignoreDrag || this.busy || Math.abs(dx) < DRAG_START) return;
       if (Math.abs(dy) > Math.abs(dx)) { this.ignoreDrag = true; return; }
+      // A mouse drag selects text (like the Kindle desktop app); a drag that extends a selection is not a turn.
+      if (e.pointerType === 'mouse' || !document.getSelection()?.isCollapsed) { this.ignoreDrag = true; return; }
       const dir: TurnDirection = dx < 0 ? 1 : -1;
       if (!this.host.canTurn(dir)) { this.ignoreDrag = true; return; }
       if (reducedMotion()) { this.host.turn(dir); this.ignoreDrag = true; this.swallowClick = true; return; }
