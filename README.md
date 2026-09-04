@@ -24,6 +24,8 @@ Además del modo DJ, Open Beat incluye un lector de libros con **lectura biónic
 - **Lector** (`/leer/:id`): aspecto tipo Kindle. El texto del PDF se extrae con [pdf.js](https://mozilla.github.io/pdf.js/), se reconstruyen párrafos, títulos y subtítulos (también los cortados entre páginas) y se pagina en pantallas completas capítulo a capítulo. Navegación tocando los bordes, con las flechas del teclado o con la barra de progreso.
 - **Ajustes (Aa)**: activar o desactivar el formato biónico y su intensidad (baja, media, alta), fuente serif o sans, tamaño, interlineado y tema (blanco, sepia, verde, oscuro). La posición de lectura y los ajustes se recuerdan.
 
+**Versión autónoma (un solo archivo).** `node scripts/build-standalone.mjs` genera `dist/standalone/librero-bionico.html`: el librero y el lector sin Angular, con el texto de los tres libros ya extraído y pdf.js incrustado, listo para publicar en cualquier sitio estático o abrir directamente desde el disco.
+
 Los PDFs de `src/assets/books/` se generan a partir de las ediciones de texto de Project Gutenberg con `node scripts/build-books.js` (requiere red y Playwright con Chromium).
 
 ## Tecnologías utilizadas

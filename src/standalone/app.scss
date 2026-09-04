@@ -1,0 +1,16 @@
+/* Standalone build: global frame + the two view stylesheets scoped under #app. */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: #100a06;
+  color: #efe6d6;
+  font-family: 'Literata', Georgia, 'Times New Roman', serif;
+  -webkit-font-smoothing: antialiased;
+}
+body.reading { overflow: hidden; }
+body.reading #app { height: 100vh; height: 100dvh; }
+button { font: inherit; }
+:focus-visible { outline: 2px solid #e0893b; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
+}
