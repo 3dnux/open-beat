@@ -13,7 +13,7 @@ import { PageTurn, TurnDirection } from '../page-turn';
 /** Horizontal gap between screens (CSS columns). */
 const GAP = 48;
 /** Chapters longer than this are split into several chunks. */
-const MAX_CHUNK = 320;
+const MAX_CHUNK = 100;
 /** Do not start a new chunk at a heading if the current one is this short (title pages). */
 const MIN_CHUNK = 4;
 
@@ -54,19 +54,39 @@ export class Reader implements OnInit, OnDestroy {
   readonly size = signal({ w: 0, h: 0 });
 
   readonly html = computed<SafeHtml>(() => {
-    const s = this.settings();
-    const c = this.chunks()[this.chunk()];
-    if (!c) return '';
-    const parts: string[] = [];
-    const flow = this.flow();
-    for (let i = c.start; i < c.end; i++) {
-      const p = flow[i];
-      const inner = s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text);
-      parts.push(`<${p.kind} data-i="${i}">${inner}</${p.kind}>`);
-    }
     // Generated from escaped text only: safe to bypass the sanitizer (keeps data-* attributes).
-    return this.sanitizer.bypassSecurityTrustHtml(parts.join(''));
+    const c = this.chunks()[this.chunk()];
+    return c ? this.sanitizer.bypassSecurityTrustHtml(this.chunkHtml(this.chunk())) : '';
   });
+
+  /** HTML of a chunk for the current typography, memoised so neighbouring chunks can be prepared ahead. */
+  private readonly htmlCache = new Map<string, string>();
+  private chunkHtml(index: number): string {
+    const s = this.settings();
+    const c = this.chunks()[index];
+    if (!c) return '';
+    const key = `${index}|${s.bionic ? s.fixation : 'plain'}`;
+    let html = this.htmlCache.get(key);
+    if (html === undefined) {
+      const flow = this.flow();
+      const parts: string[] = [];
+      for (let i = c.start; i < c.end; i++) {
+        const p = flow[i];
+        const inner = s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text);
+        parts.push(`<${p.kind} data-i="${i}">${inner}</${p.kind}>`);
+      }
+      html = parts.join('');
+      if (this.htmlCache.size > 12) this.htmlCache.clear();
+      this.htmlCache.set(key, html);
+    }
+    return html;
+  }
+
+  /** Build the neighbouring chunks' HTML while the reader is idle, so chapter changes stay quick. */
+  private warmNeighbours(): void {
+    const chunk = this.chunk();
+    setTimeout(() => { this.chunkHtml(chunk + 1); this.chunkHtml(chunk - 1); }, 80);
+  }
 
   readonly page = computed(() => this.flow()[this.index()]?.page ?? 1);
   readonly percent = computed(() => {
@@ -248,6 +268,9 @@ export class Reader implements OnInit, OnDestroy {
     this.pageTurn = new PageTurn({
       stage: el,
       columns: () => this.columns()!.nativeElement,
+      screen: () => this.screen(),
+      stride: () => this.size().w + GAP,
+      inline: dir => (dir === 1 ? this.screen() < this.screens() - 1 : this.screen() > 0),
       canTurn: dir => this.canAdvance(dir),
       turn: dir => this.advance(dir),
       snapshot: () => ({ chunk: this.chunk(), screen: this.screen() }),
@@ -294,6 +317,7 @@ export class Reader implements OnInit, OnDestroy {
     if (!el || !w) return;
     const screens = Math.max(1, Math.round((el.scrollWidth + GAP) / (w + GAP)));
     this.screens.set(screens);
+    this.warmNeighbours();
     const pending = this.pending;
     this.pending = { type: 'first' };
     let screen = this.screen();

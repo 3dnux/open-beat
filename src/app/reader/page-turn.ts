@@ -1,9 +1,15 @@
 /**
  * Page-turn gesture and animation for the reader, Kindle style: the pages
- * slide horizontally. The outgoing screen (a clone of the current one) moves
- * out while the incoming screen (a clone of the target, rendered underneath
- * in the meantime) moves in beside it, following the finger during a drag
- * and easing out on release. Buttons and keys play the full slide.
+ * slide horizontally, following the finger during a drag and easing out on
+ * release; buttons and keys play the full slide.
+ *
+ * The reader lays a whole chapter out in CSS columns and shows one column
+ * ("screen") at a time by translating the container. Within a chapter the
+ * neighbouring screen is already rendered, so the slide simply moves that
+ * container: no cloning, no waiting, one transform per frame. Only when the
+ * target screen belongs to another chapter are two lightweight copies made
+ * (just the paragraphs visible on each screen) and slid over the stage while
+ * the new chapter renders underneath.
  *
  * Framework-agnostic: works on plain DOM elements.
  */
@@ -13,10 +19,16 @@ export type TurnDirection = 1 | -1;
 export interface PageTurnHost {
   /** Positioned, overflow-hidden container the slide is drawn in. */
   stage: HTMLElement;
-  /** Element holding the screen currently rendered underneath. */
+  /** Element laying the current chapter out in columns. */
   columns(): HTMLElement;
+  /** Index of the screen (column) currently shown. */
+  screen(): number;
+  /** Horizontal distance between consecutive screens (column width + gap). */
+  stride(): number;
   canTurn(dir: TurnDirection): boolean;
-  /** Apply the page change underneath the slide. */
+  /** True when the target screen is already laid out in columns() (same chapter). */
+  inline(dir: TurnDirection): boolean;
+  /** Apply the page change. */
   turn(dir: TurnDirection): void;
   /** Position to restore when a drag is cancelled. */
   snapshot(): unknown;
@@ -25,18 +37,22 @@ export interface PageTurnHost {
 
 const DRAG_START = 10;
 const TAP_SLOP = 8;
-const SLIDE_MS = 320;
+const SLIDE_MS = 300;
 
 export class PageTurn {
-  /** Clone of the outgoing screen. */
-  private leaf?: HTMLElement;
-  /** Clone of the incoming screen. */
-  private incoming?: HTMLElement;
   private dir: TurnDirection = 1;
   private progress = 0;
-  private snap: unknown;
   private busy = false;
   private frame = 0;
+  /** Same-chapter slide: the real container moves. */
+  private inline = false;
+  private baseOffset = 0;
+  /** Cross-chapter slide: copies of the outgoing and incoming screens. */
+  private leaf?: HTMLElement;
+  private incoming?: HTMLElement;
+  private snap: unknown;
+  /** Release happened while the cross-chapter copies were still being prepared. */
+  private pendingSettle: boolean | null = null;
 
   private pointerId: number | null = null;
   private startX = 0;
@@ -82,7 +98,7 @@ export class PageTurn {
   flip(dir: TurnDirection): void {
     if (this.busy || !this.host.canTurn(dir)) return;
     if (reducedMotion()) { this.host.turn(dir); return; }
-    this.begin(dir).then(ok => { if (ok) this.settle(true); });
+    if (this.begin(dir)) this.settle(true);
   }
 
   /* ----------------------------------------------------------- pointer */
@@ -114,11 +130,9 @@ export class PageTurn {
       const dir: TurnDirection = dx < 0 ? 1 : -1;
       if (!this.host.canTurn(dir)) { this.ignoreDrag = true; return; }
       if (reducedMotion()) { this.host.turn(dir); this.ignoreDrag = true; this.swallowClick = true; return; }
+      if (!this.begin(dir)) { this.ignoreDrag = true; return; }
       this.dragging = true;
-      this.begin(dir).then(ok => { if (!ok) { this.dragging = false; this.ignoreDrag = true; } });
-      return;
     }
-    if (!this.leaf) return;
     const along = (this.dir === 1 ? -dx : dx) - DRAG_START;
     this.set(clamp(along / Math.max(1, this.host.stage.clientWidth), 0, 1));
   }
@@ -134,73 +148,91 @@ export class PageTurn {
     const fling = this.dir === 1 ? this.velocity < -0.4 : this.velocity > 0.4;
     const back = this.dir === 1 ? this.velocity > 0.4 : this.velocity < -0.4;
     const complete = e.type !== 'pointercancel' && !back && (fling || this.progress > 0.3);
-    if (this.leaf) this.settle(complete);
+    if (this.inline || this.incoming) this.settle(complete);
     else this.pendingSettle = complete;
   }
 
-  /** Release happened while the fold was still being prepared. */
-  private pendingSettle: boolean | null = null;
-
   /* -------------------------------------------------------------- slide */
 
-  private async begin(dir: TurnDirection): Promise<boolean> {
-    const stage = this.host.stage;
-    const source = this.host.columns();
-    if (!source || this.busy) return false;
+  private begin(dir: TurnDirection): boolean {
+    if (this.busy) return false;
     this.busy = true;
     this.dir = dir;
-    this.snap = this.host.snapshot();
+    this.progress = 0;
     this.pendingSettle = null;
+    this.inline = this.host.inline(dir);
+    if (this.inline) {
+      this.baseOffset = -this.host.screen() * this.host.stride();
+      return true;
+    }
+    this.beginAcrossChapters(dir);
+    return true;
+  }
 
-    // Cover the stage with the current screen, let the target render underneath,
-    // then clone it as the incoming page.
+  /** Cover the stage with a copy of the current screen, render the target underneath, copy it as the incoming page. */
+  private async beginAcrossChapters(dir: TurnDirection): Promise<void> {
+    const stage = this.host.stage;
     const leaf = el('leaf');
-    leaf.appendChild(cloneColumns(source));
+    leaf.appendChild(cloneScreen(this.host.columns(), this.host.screen(), this.host.stride()));
     stage.appendChild(leaf);
     this.leaf = leaf;
+    this.snap = this.host.snapshot();
     this.host.turn(dir);
     await nextFrames(2);
-    if (this.leaf !== leaf) return false; // detached meanwhile
+    if (this.leaf !== leaf) return; // detached meanwhile
     const incoming = el(`leaf-in ${dir === 1 ? 'from-right' : 'from-left'}`);
-    incoming.appendChild(cloneColumns(this.host.columns()));
+    incoming.appendChild(cloneScreen(this.host.columns(), this.host.screen(), this.host.stride()));
     stage.appendChild(incoming);
     this.incoming = incoming;
-    this.set(0);
+    this.set(this.progress);
     if (this.pendingSettle !== null) { const c = this.pendingSettle; this.pendingSettle = null; this.settle(c); }
-    return true;
   }
 
   /** Draw the slide for progress p (0 = untouched, 1 = fully turned). */
   private set(p: number): void {
     this.progress = p;
+    const shift = this.host.stride() * p * this.dir; // forward moves left, back moves right
+    if (this.inline) {
+      this.host.columns().style.transform = `translateX(${(this.baseOffset - shift).toFixed(1)}px)`;
+      return;
+    }
     if (!this.leaf || !this.incoming) return;
     const w = this.host.stage.clientWidth;
-    const shift = w * p * this.dir; // forward moves left, back moves right
     this.leaf.style.transform = `translateX(${(-shift).toFixed(1)}px)`;
     this.incoming.style.transform = `translateX(${(w * this.dir - shift).toFixed(1)}px)`;
   }
 
   private settle(complete: boolean): void {
-    if (!this.leaf) return;
     const from = this.progress;
     const to = complete ? 1 : 0;
-    const duration = Math.max(140, SLIDE_MS * Math.abs(to - from));
+    const duration = Math.max(120, SLIDE_MS * Math.abs(to - from));
     const t0 = performance.now();
     const step = (now: number) => {
       const t = clamp((now - t0) / duration, 0, 1);
       this.set(from + (to - from) * easeOutCubic(t));
       if (t < 1) { this.frame = requestAnimationFrame(step); return; }
-      if (!complete) this.host.restore(this.snap);
-      // Keep the cover until the restored page has rendered underneath.
-      nextFrames(complete ? 0 : 2).then(() => this.cleanup());
+      this.finish(complete);
     };
     this.frame = requestAnimationFrame(step);
+  }
+
+  private finish(complete: boolean): void {
+    if (this.inline) {
+      // The container already sits on the target screen; make the reader agree.
+      if (complete) this.host.turn(this.dir);
+      this.cleanup();
+      return;
+    }
+    if (!complete) this.host.restore(this.snap);
+    // Keep the copies until the restored page has rendered underneath.
+    nextFrames(complete ? 0 : 2).then(() => this.cleanup());
   }
 
   private cleanup(): void {
     this.leaf?.remove();
     this.incoming?.remove();
     this.leaf = this.incoming = undefined;
+    this.inline = false;
     this.progress = 0;
     this.busy = false;
   }
@@ -212,9 +244,30 @@ function el(className: string): HTMLElement {
   return d;
 }
 
-function cloneColumns(source: HTMLElement): HTMLElement {
-  const clone = source.cloneNode(true) as HTMLElement;
+/**
+ * Copy of the columns container holding only what is visible on the given
+ * screen: the paragraphs starting on it plus the one flowing in from the
+ * previous column, placed at its original height with a spacer so the line
+ * breaks fall in the same places. Cheap to lay out even for long chapters.
+ */
+function cloneScreen(source: HTMLElement, screen: number, stride: number): HTMLElement {
+  const clone = source.cloneNode(false) as HTMLElement;
   clone.removeAttribute('id');
+  const children = Array.from(source.children) as HTMLElement[];
+  const col = (e: HTMLElement) => Math.round(e.offsetLeft / stride);
+  let first = children.findIndex(e => col(e) >= screen);
+  if (first < 0) first = children.length;
+  const start = Math.max(0, first - 1);
+  let end = first;
+  while (end < children.length && col(children[end]) === screen) end++;
+  if (start < children.length) {
+    const lead = children[start];
+    const spacer = document.createElement('div');
+    spacer.style.height = `${Math.max(0, lead.offsetTop - parseFloat(getComputedStyle(lead).marginTop) || 0)}px`;
+    clone.appendChild(spacer);
+    for (let i = start; i < end; i++) clone.appendChild(children[i].cloneNode(true));
+    clone.style.transform = `translateX(${-(screen - col(lead)) * stride}px)`;
+  }
   return clone;
 }
 

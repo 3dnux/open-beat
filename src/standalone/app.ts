@@ -28,7 +28,7 @@ const STORE = 'books';
 const PROGRESS_KEY = 'bionic-reader:progress:';
 const SETTINGS_KEY = 'bionic-reader:settings';
 const GAP = 48;
-const MAX_CHUNK = 320;
+const MAX_CHUNK = 100;
 const MIN_CHUNK = 4;
 const SHELF_SIZE = 4;
 const DEMO_TEXT =
@@ -348,6 +348,9 @@ class Reader {
     this.pageTurn = new PageTurn({
       stage: this.stage,
       columns: () => this.columns,
+      screen: () => this.screen,
+      stride: () => this.size.w + GAP,
+      inline: dir => (dir === 1 ? this.screen < this.screens - 1 : this.screen > 0),
       canTurn: dir => dir === 1 ? !this.isLast() : !this.isFirst(),
       turn: dir => this.advance(dir),
       snapshot: () => ({ chunk: this.chunk, screen: this.screen }),
@@ -465,16 +468,33 @@ class Reader {
     if (this.showSettings) this.renderSettings();
   }
 
-  private renderChunk(): void {
+  private readonly htmlCache = new Map<string, string>();
+
+  /** HTML of a chunk for the current typography, memoised so neighbouring chunks can be prepared ahead. */
+  private chunkHtml(index: number): string {
     const s = this.library.settings;
-    const c = this.chunks[this.chunk];
-    const parts: string[] = [];
-    for (let i = c.start; i < c.end; i++) {
-      const p = this.flow[i];
-      parts.push(`<${p.kind} data-i="${i}">${s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text)}</${p.kind}>`);
+    const c = this.chunks[index];
+    if (!c) return '';
+    const key = `${index}|${s.bionic ? s.fixation : 'plain'}`;
+    let html = this.htmlCache.get(key);
+    if (html === undefined) {
+      const parts: string[] = [];
+      for (let i = c.start; i < c.end; i++) {
+        const p = this.flow[i];
+        parts.push(`<${p.kind} data-i="${i}">${s.bionic ? toBionicHtml(p.text, s.fixation) : toPlainHtml(p.text)}</${p.kind}>`);
+      }
+      html = parts.join('');
+      if (this.htmlCache.size > 12) this.htmlCache.clear();
+      this.htmlCache.set(key, html);
     }
-    this.columns.innerHTML = parts.join('');
+    return html;
+  }
+
+  private renderChunk(): void {
+    this.columns.innerHTML = this.chunkHtml(this.chunk);
     requestAnimationFrame(() => this.measure());
+    const chunk = this.chunk;
+    setTimeout(() => { this.chunkHtml(chunk + 1); this.chunkHtml(chunk - 1); }, 80);
   }
 
   private layout(): void {
