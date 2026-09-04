@@ -1,12 +1,14 @@
 /**
  * Page-turn gesture and animation for the reader.
  *
- * The reader shows one screen of a chapter at a time. To turn a page, the
- * current screen is cloned into a "leaf" laid over the stage, the real
- * content underneath switches to the target screen, and the leaf folds away
- * in 3D around the spine (left edge when going forward, right edge when going
- * back), revealing the new page. A drag makes the leaf follow the finger and
- * completes or snaps back on release; buttons and keys play the full turn.
+ * The reader shows one screen of a chapter at a time. A turn is drawn as a
+ * flat paper fold: the sheet being turned is a clone of its screen, clipped
+ * at a vertical crease that travels across the stage; the part already
+ * turned lies over it as the light back of the sheet, and the page beneath
+ * appears on the other side of the crease. Going forward the current sheet
+ * folds toward the spine (left edge); going back, the previous sheet unfolds
+ * from it. A drag makes the crease follow the finger and completes or snaps
+ * back on release; buttons and keys play the full turn.
  *
  * Framework-agnostic: works on plain DOM elements.
  */
@@ -14,12 +16,12 @@
 export type TurnDirection = 1 | -1;
 
 export interface PageTurnHost {
-  /** Positioned, overflow-hidden container the leaf is laid over. */
+  /** Positioned, overflow-hidden container the fold is drawn in. */
   stage: HTMLElement;
-  /** Element holding the current screen (cloned into the leaf). */
+  /** Element holding the screen currently rendered underneath. */
   columns(): HTMLElement;
   canTurn(dir: TurnDirection): boolean;
-  /** Apply the page change underneath the leaf. */
+  /** Apply the page change underneath the fold. */
   turn(dir: TurnDirection): void;
   /** Position to restore when a drag is cancelled. */
   snapshot(): unknown;
@@ -28,17 +30,18 @@ export interface PageTurnHost {
 
 const DRAG_START = 10;
 const TAP_SLOP = 8;
-const FLIP_MS = 460;
-const EASING = 'cubic-bezier(.25,.7,.25,1)';
+const FLIP_MS = 420;
 
 export class PageTurn {
   private leaf?: HTMLElement;
-  private shade?: HTMLElement;
+  private back?: HTMLElement;
   private shadow?: HTMLElement;
+  private under?: HTMLElement;
   private dir: TurnDirection = 1;
   private progress = 0;
   private snap: unknown;
-  private animating = false;
+  private busy = false;
+  private frame = 0;
 
   private pointerId: number | null = null;
   private startX = 0;
@@ -76,22 +79,21 @@ export class PageTurn {
     s.removeEventListener('pointerup', this.onUp);
     s.removeEventListener('pointercancel', this.onUp);
     s.removeEventListener('click', this.onClick, true);
-    this.removeLeaf();
+    cancelAnimationFrame(this.frame);
+    this.cleanup();
   }
 
   /** Full animated turn (buttons, keyboard, tap zones). */
   flip(dir: TurnDirection): void {
-    if (this.animating || this.leaf) return;
-    if (!this.host.canTurn(dir)) return;
+    if (this.busy || !this.host.canTurn(dir)) return;
     if (reducedMotion()) { this.host.turn(dir); return; }
-    if (!this.begin(dir)) return;
-    this.settle(true);
+    this.begin(dir).then(ok => { if (ok) this.settle(true); });
   }
 
   /* ----------------------------------------------------------- pointer */
 
   private down(e: PointerEvent): void {
-    if (this.animating || this.pointerId !== null || e.button !== 0) return;
+    if (this.busy || this.pointerId !== null || e.button !== 0) return;
     this.pointerId = e.pointerId;
     this.startX = this.lastX = e.clientX;
     this.startY = e.clientY;
@@ -112,15 +114,17 @@ export class PageTurn {
     this.lastT = e.timeStamp;
 
     if (!this.dragging) {
-      if (this.ignoreDrag || Math.abs(dx) < DRAG_START) return;
+      if (this.ignoreDrag || this.busy || Math.abs(dx) < DRAG_START) return;
       if (Math.abs(dy) > Math.abs(dx)) { this.ignoreDrag = true; return; }
       const dir: TurnDirection = dx < 0 ? 1 : -1;
       if (!this.host.canTurn(dir)) { this.ignoreDrag = true; return; }
       if (reducedMotion()) { this.host.turn(dir); this.ignoreDrag = true; this.swallowClick = true; return; }
-      if (!this.begin(dir)) { this.ignoreDrag = true; return; }
       this.dragging = true;
+      this.begin(dir).then(ok => { if (!ok) { this.dragging = false; this.ignoreDrag = true; } });
+      return;
     }
-    const travel = Math.max(120, this.host.stage.clientWidth * 0.55);
+    if (!this.leaf) return;
+    const travel = Math.max(120, this.host.stage.clientWidth * 0.6);
     const along = (this.dir === 1 ? -dx : dx) - DRAG_START;
     this.set(clamp(along / travel, 0, 1));
   }
@@ -135,86 +139,125 @@ export class PageTurn {
     this.dragging = false;
     const fling = this.dir === 1 ? this.velocity < -0.4 : this.velocity > 0.4;
     const back = this.dir === 1 ? this.velocity > 0.4 : this.velocity < -0.4;
-    const complete = e.type !== 'pointercancel' && !back && (fling || this.progress > 0.32);
-    this.settle(complete);
+    const complete = e.type !== 'pointercancel' && !back && (fling || this.progress > 0.3);
+    if (this.leaf) this.settle(complete);
+    else this.pendingSettle = complete;
   }
 
-  /* --------------------------------------------------------------- leaf */
+  /** Release happened while the fold was still being prepared. */
+  private pendingSettle: boolean | null = null;
 
-  private begin(dir: TurnDirection): boolean {
+  /* --------------------------------------------------------------- fold */
+
+  private async begin(dir: TurnDirection): Promise<boolean> {
     const stage = this.host.stage;
     const source = this.host.columns();
-    if (!source) return false;
-    const side = dir === 1 ? 'next' : 'prev';
+    if (!source || this.busy) return false;
+    this.busy = true;
+    this.dir = dir;
+    this.snap = this.host.snapshot();
+    this.pendingSettle = null;
 
-    const leaf = document.createElement('div');
-    leaf.className = `leaf ${side}`;
-    const clone = source.cloneNode(true) as HTMLElement;
-    clone.removeAttribute('id');
-    leaf.appendChild(clone);
-    const shade = document.createElement('div');
-    shade.className = 'leaf-shade';
-    leaf.appendChild(shade);
-    const shadow = document.createElement('div');
-    shadow.className = `leaf-shadow ${side}`;
+    const shadow = el('leaf-shadow');
+    const back = el('leaf-back');
+    let leaf: HTMLElement;
+
+    if (dir === 1) {
+      // Forward: the current screen is the sheet; the next page is already underneath.
+      leaf = el('leaf');
+      leaf.appendChild(cloneColumns(source));
+      this.host.turn(dir);
+    } else {
+      // Back: keep a copy of the current screen on top, let the previous page render
+      // underneath, then use that previous page as the sheet unfolding from the spine.
+      const under = el('leaf-under');
+      under.appendChild(cloneColumns(source));
+      stage.appendChild(under);
+      this.under = under;
+      this.host.turn(dir);
+      await nextFrames(2);
+      if (!this.under) return false; // detached meanwhile
+      leaf = el('leaf');
+      leaf.appendChild(cloneColumns(this.host.columns()));
+    }
 
     stage.appendChild(shadow);
     stage.appendChild(leaf);
+    stage.appendChild(back);
     this.leaf = leaf;
-    this.shade = shade;
+    this.back = back;
     this.shadow = shadow;
-    this.dir = dir;
-    this.snap = this.host.snapshot();
     this.set(0);
-    this.host.turn(dir);
+    if (this.pendingSettle !== null) { const c = this.pendingSettle; this.pendingSettle = null; this.settle(c); }
     return true;
   }
 
+  /** Draw the fold for progress p (0 = untouched, 1 = fully turned). */
   private set(p: number): void {
     this.progress = p;
-    if (!this.leaf || !this.shade || !this.shadow) return;
-    this.leaf.style.transform = transformAt(this.dir, p);
-    this.shade.style.opacity = String(Math.min(1, p * 1.4));
-    this.shadow.style.opacity = String(Math.sin(p * Math.PI) * 0.9);
+    if (!this.leaf || !this.back || !this.shadow) return;
+    const w = this.host.stage.clientWidth;
+    // Crease position: forward it travels from the free edge to the spine, back the other way.
+    const crease = this.dir === 1 ? w * (1 - p) : w * p;
+    const edge = Math.max(0, 2 * crease - w);         // free edge of the folded part
+    const backWidth = Math.max(0, crease - edge);
+    this.leaf.style.clipPath = `inset(0 ${Math.max(0, w - crease).toFixed(1)}px 0 0)`;
+    this.back.style.left = `${edge.toFixed(1)}px`;
+    this.back.style.width = `${backWidth.toFixed(1)}px`;
+    this.back.style.opacity = backWidth > 0.5 ? '1' : '0';
+    this.shadow.style.left = `${crease.toFixed(1)}px`;
+    this.shadow.style.opacity = (Math.sin(p * Math.PI) * 0.85).toFixed(3);
   }
 
   private settle(complete: boolean): void {
-    if (!this.leaf || !this.shade || !this.shadow) return;
-    this.animating = true;
+    if (!this.leaf) return;
     const from = this.progress;
     const to = complete ? 1 : 0;
-    const duration = Math.max(140, FLIP_MS * Math.abs(to - from));
-    const leaf = this.leaf;
-    const anims = [
-      leaf.animate([{ transform: transformAt(this.dir, from) }, { transform: transformAt(this.dir, to) }], { duration, easing: EASING, fill: 'forwards' }),
-      this.shade.animate([{ opacity: Math.min(1, from * 1.4) }, { opacity: Math.min(1, to * 1.4) }], { duration, easing: EASING, fill: 'forwards' }),
-      this.shadow.animate(
-        [{ opacity: Math.sin(from * Math.PI) * 0.9 }, { opacity: complete ? 0 : 0, offset: 1 }],
-        { duration, easing: EASING, fill: 'forwards' },
-      ),
-    ];
-    const done = () => {
-      if (this.leaf !== leaf) return;
+    const duration = Math.max(160, FLIP_MS * Math.abs(to - from));
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const t = clamp((now - t0) / duration, 0, 1);
+      this.set(from + (to - from) * easeOutCubic(t));
+      if (t < 1) { this.frame = requestAnimationFrame(step); return; }
       if (!complete) this.host.restore(this.snap);
-      this.removeLeaf();
-      this.animating = false;
+      // Keep the cover until the restored page has rendered underneath.
+      nextFrames(complete ? 0 : 2).then(() => this.cleanup());
     };
-    Promise.all(anims.map(a => a.finished)).then(done, done);
+    this.frame = requestAnimationFrame(step);
   }
 
-  private removeLeaf(): void {
+  private cleanup(): void {
     this.leaf?.remove();
+    this.back?.remove();
     this.shadow?.remove();
-    this.leaf = this.shade = this.shadow = undefined;
+    this.under?.remove();
+    this.leaf = this.back = this.shadow = this.under = undefined;
     this.progress = 0;
+    this.busy = false;
   }
 }
 
-function transformAt(dir: TurnDirection, p: number): string {
-  // Forward: fold around the left edge, free edge lifting toward the reader.
-  // Back: fold around the right edge.
-  const angle = (dir === 1 ? -90 : 90) * p;
-  return `rotateY(${angle.toFixed(2)}deg)`;
+function el(className: string): HTMLElement {
+  const d = document.createElement('div');
+  d.className = className;
+  return d;
+}
+
+function cloneColumns(source: HTMLElement): HTMLElement {
+  const clone = source.cloneNode(true) as HTMLElement;
+  clone.removeAttribute('id');
+  return clone;
+}
+
+function nextFrames(n: number): Promise<void> {
+  return new Promise(resolve => {
+    const tick = () => (n-- <= 0 ? resolve() : requestAnimationFrame(tick));
+    tick();
+  });
+}
+
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
 }
 
 function clamp(v: number, min: number, max: number): number {
