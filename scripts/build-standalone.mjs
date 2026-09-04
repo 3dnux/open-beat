@@ -6,7 +6,8 @@
  * worker are inlined too (the worker runs on the main thread), so user PDFs
  * can be opened without any network access.
  *
- *   node scripts/build-standalone.mjs
+ *   node scripts/build-standalone.mjs          # page fragment for publishing as an artifact
+ *   node scripts/build-standalone.mjs --app    # full document in dist/android-www for the Android app
  */
 import { build } from 'esbuild';
 import * as sass from 'sass';
@@ -84,7 +85,12 @@ const html = template
   .replace('/*__PDFJS__*/', () => safe(inlineModule('pdf.min.mjs')))
   .replace('/*__PDFWORKER__*/', () => safe(inlineModule('pdf.worker.min.mjs')))
   .replace('/*__SCRIPT__*/', () => safe(js));
-fs.mkdirSync(OUT, { recursive: true });
-const file = path.join(OUT, 'librero-bionico.html');
-fs.writeFileSync(file, html);
-console.log(`→ ${path.relative(ROOT, file)} (${(html.length / 1024).toFixed(0)} kB)`);
+const appMode = process.argv.includes('--app');
+const outDir = appMode ? path.join(ROOT, 'dist/android-www') : OUT;
+fs.mkdirSync(outDir, { recursive: true });
+const file = path.join(outDir, appMode ? 'index.html' : 'librero-bionico.html');
+const document = appMode
+  ? `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="dark light"><style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>${html}</head><body></body></html>`
+  : html;
+fs.writeFileSync(file, document);
+console.log(`→ ${path.relative(ROOT, file)} (${(document.length / 1024).toFixed(0)} kB)`);

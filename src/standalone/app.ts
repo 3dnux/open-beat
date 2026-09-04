@@ -14,6 +14,28 @@ import { Rsvp, RsvpWord, rsvpWords } from '../app/reader/rsvp';
 import { highlightRange, rangeForText } from '../app/reader/text-range';
 import { Annotation, AnnotationStore, HIGHLIGHT_COLORS, HighlightColor, SelectionInfo, markupWithHighlights, selectionInfo } from '../app/reader/annotations';
 import { DictionaryEntry, lookup } from '../app/reader/dictionary';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+/* ------------------------------------------------------- native (Android) */
+
+interface ScannedFile { path: string; name: string; size: number; modified: number; }
+interface BookScannerPlugin {
+  hasAccess(): Promise<{ granted: boolean }>;
+  requestAccess(): Promise<{ granted: boolean }>;
+  scan(options: { folders: string[] }): Promise<{ files: ScannedFile[] }>;
+  read(options: { path: string }): Promise<{ data: string }>;
+}
+const BookScanner = registerPlugin<BookScannerPlugin>('BookScanner');
+const NATIVE = Capacitor.isNativePlatform();
+const SCAN_FOLDERS = ['Download', 'Documents', 'Libros', 'Books'];
+const AUTO_IMPORT_KEY = 'bionic-reader:auto-import';
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 interface StoredBook {
   id: string;
@@ -24,6 +46,8 @@ interface StoredBook {
   pages: number;
   flow: Paragraph[];
   local?: boolean;
+  /** Path on the device for books found by the scanner (avoids importing twice). */
+  source?: string;
 }
 
 declare global {
@@ -140,8 +164,11 @@ async function loadPdfJs(): Promise<PdfJsLike> {
 }
 
 async function importPdf(file: File, onProgress: (pct: number) => void): Promise<Omit<StoredBook, 'id' | 'cover'>> {
+  return importPdfBytes(new Uint8Array(await file.arrayBuffer()), file.name, onProgress);
+}
+
+async function importPdfBytes(data: Uint8Array, fileName: string, onProgress: (pct: number) => void): Promise<Omit<StoredBook, 'id' | 'cover'>> {
   const pdfjs = await loadPdfJs();
-  const data = new Uint8Array(await file.arrayBuffer());
   const task = pdfjs.getDocument({ data, disableFontFace: true, useSystemFonts: false });
   const doc = await task.promise;
   try {
@@ -163,7 +190,7 @@ async function importPdf(file: File, onProgress: (pct: number) => void): Promise
       title = typeof info['Title'] === 'string' ? info['Title'].trim() : '';
       author = typeof info['Author'] === 'string' ? info['Author'].trim() : '';
     } catch { /* no metadata */ }
-    return { title: title || titleFromFileName(file.name), author: author || 'PDF propio', pages: doc.numPages, flow };
+    return { title: title || titleFromFileName(fileName), author: author || 'PDF propio', pages: doc.numPages, flow };
   } finally {
     task.destroy().catch(() => undefined);
   }
@@ -181,8 +208,67 @@ class Shelf {
   private busyPct = 0;
   private error = '';
   private demoBionic = true;
+  private scan: { files: ScannedFile[]; message?: string; open: boolean } = { files: [], open: false };
+  private autoImport = read<boolean>(AUTO_IMPORT_KEY, true);
+  private importing = '';
 
   constructor(private root: HTMLElement, private library: Library) {}
+
+  /** Books already imported from the device, by path. */
+  private known(): Set<string> { return new Set(this.library.books.map(b => b.source).filter((x): x is string => !!x)); }
+
+  /** On Android: quietly add any new PDF found in the watched folders. */
+  async autoScan(): Promise<void> {
+    if (!NATIVE || !this.autoImport) return;
+    try {
+      if (!(await BookScanner.hasAccess()).granted) return;
+      const { files } = await BookScanner.scan({ folders: SCAN_FOLDERS });
+      const fresh = files.filter(f => !this.known().has(f.path));
+      for (const f of fresh) await this.importScanned(f);
+    } catch (e) {
+      this.error = 'No se pudo revisar las carpetas del teléfono. ' + (e instanceof Error ? e.message : '');
+      this.render();
+    }
+  }
+
+  private async importScanned(f: ScannedFile): Promise<void> {
+    this.importing = f.name; this.render();
+    try {
+      const { data } = await BookScanner.read({ path: f.path });
+      const book = await importPdfBytes(base64ToBytes(data), f.name, () => undefined);
+      await this.library.add({ ...book, id: 'local-' + Date.now().toString(36), cover: this.library.nextCover(), local: true, source: f.path });
+    } catch (e) {
+      this.error = `No se pudo abrir «${f.name}». ` + (e instanceof Error ? e.message : '');
+    } finally {
+      this.importing = ''; this.render();
+    }
+  }
+
+  private async scanPhone(): Promise<void> {
+    this.error = '';
+    try {
+      let { granted } = await BookScanner.hasAccess();
+      if (!granted) {
+        granted = (await BookScanner.requestAccess()).granted;
+        if (!granted) {
+          this.scan = { files: [], open: true, message: 'Activa «Permitir acceso a todos los archivos» para esta app y vuelve a intentarlo.' };
+          this.render();
+          return;
+        }
+      }
+      const { files } = await BookScanner.scan({ folders: SCAN_FOLDERS });
+      this.scan = { files, open: true, message: files.length ? undefined : 'No se encontraron PDF en Descargas, Documentos ni Libros.' };
+    } catch (e) {
+      this.scan = { files: [], open: true, message: 'No se pudo buscar en el teléfono. ' + (e instanceof Error ? e.message : '') };
+    }
+    this.render();
+  }
+
+  private async addScanned(paths: string[]): Promise<void> {
+    const files = this.scan.files.filter(f => paths.includes(f.path));
+    this.scan = { files: [], open: false };
+    for (const f of files) await this.importScanned(f);
+  }
 
   render(): void {
     const items = this.library.books.map(book => {
@@ -229,12 +315,32 @@ class Shelf {
             <span class="author">Abre tu propio libro</span>
           </span></span>
           <span class="pages"></span>
-        </button>` : ''}
+        </button>
+        ${NATIVE ? `<button class="book add" type="button" data-scan ${this.importing ? 'disabled' : ''} aria-label="Buscar libros en el teléfono">
+          <span class="spine"></span>
+          <span class="cover"><span class="frame">
+            <span class="plus">${this.importing ? '…' : '⌕'}</span>
+            <span class="title">${this.importing ? 'Añadiendo' : 'Buscar en el teléfono'}</span>
+            <span class="author">${this.importing ? esc(this.importing) : 'Descargas, Documentos, Libros'}</span>
+          </span></span>
+          <span class="pages"></span>
+        </button>` : ''}` : ''}
       </div>
       <div class="plank"></div>
     </div>`).join('')}
   </section>
   ${this.error ? `<p class="error" role="alert">${esc(this.error)}</p>` : ''}
+  ${NATIVE ? `<section class="native">
+    <label class="switch"><input type="checkbox" data-auto ${this.autoImport ? 'checked' : ''} /><span>Añadir solos los PDF nuevos de Descargas, Documentos y Libros al abrir la app</span></label>
+    ${this.scan.open ? `<div class="scan-panel">
+      <div class="scan-head"><h2>PDF en el teléfono</h2><button type="button" class="link" data-scan-close>Cerrar</button></div>
+      ${this.scan.message ? `<p class="scan-msg">${esc(this.scan.message)}</p>` : ''}
+      ${this.scan.files.length ? `<ul class="scan-list">${this.scan.files.map(f => `<li><label>
+          <input type="checkbox" data-file-path="${esc(f.path)}" ${this.known().has(f.path) ? 'disabled' : 'checked'} />
+          <span class="name">${esc(f.name)}</span><span class="meta">${(f.size / 1048576).toFixed(1)} MB${this.known().has(f.path) ? ' · ya en el librero' : ''}</span></label></li>`).join('')}</ul>
+        <button type="button" class="primary" data-scan-add>Añadir seleccionados</button>` : ''}
+    </div>` : ''}
+  </section>` : ''}
   <section class="demo">
     <div class="demo-head">
       <h2>¿Qué es la lectura biónica?</h2>
@@ -248,12 +354,21 @@ class Shelf {
     this.root.onclick = e => this.onClick(e);
     this.root.onkeydown = e => { if (e.key === 'Enter' && (e.target as HTMLElement).dataset['remove']) this.onClick(e as unknown as MouseEvent); };
     $('[data-demo]', this.root).onchange = () => { this.demoBionic = !this.demoBionic; this.render(); };
+    const auto = this.root.querySelector<HTMLInputElement>('[data-auto]');
+    if (auto) auto.onchange = () => { this.autoImport = auto.checked; write(AUTO_IMPORT_KEY, this.autoImport); if (this.autoImport) this.autoScan(); };
     $<HTMLInputElement>('[data-file]', this.root).onchange = e => this.onFile(e);
   }
 
   private onClick(e: MouseEvent): void {
-    const t = (e.target as HTMLElement).closest<HTMLElement>('[data-remove],[data-add],[data-open]');
+    const t = (e.target as HTMLElement).closest<HTMLElement>('[data-remove],[data-add],[data-open],[data-scan],[data-scan-close],[data-scan-add]');
     if (!t) return;
+    if ('scan' in t.dataset) { this.scanPhone(); return; }
+    if ('scanClose' in t.dataset) { this.scan = { files: [], open: false }; this.render(); return; }
+    if ('scanAdd' in t.dataset) {
+      const paths = Array.from(this.root.querySelectorAll<HTMLInputElement>('[data-file-path]:checked')).map(i => i.dataset['filePath']!);
+      this.addScanned(paths);
+      return;
+    }
     if (t.dataset['remove']) {
       e.stopPropagation();
       const book = this.library.get(t.dataset['remove']);
@@ -1015,6 +1130,7 @@ async function main(): Promise<void> {
   const library = new Library();
   await library.load();
   let reader: Reader | undefined;
+  let shelf: Shelf | undefined;
 
   const route = () => {
     reader?.unmount();
@@ -1023,14 +1139,18 @@ async function main(): Promise<void> {
     const book = m ? library.get(decodeURIComponent(m[1])) : undefined;
     document.body.classList.toggle('reading', !!book);
     if (book) {
+      shelf = undefined;
       reader = new Reader(root, library, book);
       reader.mount();
     } else {
       if (m) location.hash = '#/';
-      new Shelf(root, library).render();
+      shelf = new Shelf(root, library);
+      shelf.render();
+      shelf.autoScan();
     }
   };
   window.addEventListener('hashchange', route);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) shelf?.autoScan(); });
   route();
 }
 

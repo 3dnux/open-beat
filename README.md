@@ -33,6 +33,16 @@ Además del modo DJ, Open Beat incluye un lector de libros con **lectura biónic
 
 **Versión autónoma (un solo archivo).** `node scripts/build-standalone.mjs` genera `dist/standalone/librero-bionico.html`: el librero y el lector sin Angular, con el texto de los tres libros ya extraído y pdf.js incrustado, listo para publicar en cualquier sitio estático o abrir directamente desde el disco.
 
+**App para Android (APK).** La carpeta `android/` contiene el proyecto Capacitor que empaqueta el lector como app nativa. Además de "Añadir PDF", la app busca libros en el teléfono: el botón "Buscar en el teléfono" lista los PDF de Descargas, Documentos y una carpeta `Libros` para elegir cuáles añadir, y con la opción "Añadir solos los PDF nuevos" se incorporan automáticamente al abrir la app. En Android 11 o superior pide el permiso "Acceso a todos los archivos" (necesario para leer documentos guardados por otras apps). Para compilar:
+
+```
+node scripts/build-standalone.mjs --app   # genera dist/android-www
+npx cap sync android
+cd android && ./gradlew assembleDebug     # android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Requiere JDK 21 y el SDK de Android (API 36). El flujo de GitHub Actions `Android APK` compila el APK en cada push y lo deja como artefacto descargable de la ejecución.
+
 Los PDFs de `src/assets/books/` se generan a partir de las ediciones de texto de Project Gutenberg con `node scripts/build-books.js` (requiere red y Playwright con Chromium).
 
 ## Tecnologías utilizadas
