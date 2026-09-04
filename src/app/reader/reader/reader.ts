@@ -8,6 +8,7 @@ import { Book, Paragraph, ReaderFont, ReaderTheme } from '../models';
 import { LibraryService } from '../library.service';
 import { PdfTextService } from '../pdf-text.service';
 import { toBionicHtml, toPlainHtml } from '../bionic';
+import { PageTurn, TurnDirection } from '../page-turn';
 
 /** Horizontal gap between screens (CSS columns). */
 const GAP = 48;
@@ -17,7 +18,7 @@ const MAX_CHUNK = 320;
 const MIN_CHUNK = 4;
 
 interface Chunk { start: number; end: number; }
-type Pending = { type: 'first' } | { type: 'last' } | { type: 'index'; index: number };
+type Pending = { type: 'first' } | { type: 'last' } | { type: 'index'; index: number } | { type: 'screen'; screen: number };
 
 @Component({
   selector: 'app-reader',
@@ -94,6 +95,7 @@ export class Reader implements OnInit, OnDestroy {
   private pending: Pending = { type: 'first' };
   private resizeObserver?: ResizeObserver;
   private saveTimer?: ReturnType<typeof setTimeout>;
+  private pageTurn?: PageTurn;
 
   constructor() {
     // Re-measure whenever the content, the viewport or the typography change.
@@ -142,6 +144,7 @@ export class Reader implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.pageTurn?.detach();
     this.resizeObserver?.disconnect();
     clearTimeout(this.saveTimer);
     if (this.id) {
@@ -170,16 +173,28 @@ export class Reader implements OnInit, OnDestroy {
     else this.showChrome.update(v => !v);
   }
 
-  next(): void {
+  next(): void { this.turn(1); }
+  prev(): void { this.turn(-1); }
+
+  /** Animated page turn; falls back to a plain change before the gesture layer exists. */
+  private turn(dir: TurnDirection): void {
     if (this.loading()) return;
-    if (this.screen() < this.screens() - 1) this.screen.update(s => s + 1);
-    else if (this.chunk() < this.chunks().length - 1) this.setChunk(this.chunk() + 1, { type: 'first' });
+    if (this.pageTurn) this.pageTurn.flip(dir);
+    else this.advance(dir);
   }
 
-  prev(): void {
-    if (this.loading()) return;
-    if (this.screen() > 0) this.screen.update(s => s - 1);
-    else if (this.chunk() > 0) this.setChunk(this.chunk() - 1, { type: 'last' });
+  private canAdvance(dir: TurnDirection): boolean {
+    return !this.loading() && (dir === 1 ? !this.isLast() : !this.isFirst());
+  }
+
+  private advance(dir: TurnDirection): void {
+    if (dir === 1) {
+      if (this.screen() < this.screens() - 1) this.screen.update(s => s + 1);
+      else if (this.chunk() < this.chunks().length - 1) this.setChunk(this.chunk() + 1, { type: 'first' });
+    } else {
+      if (this.screen() > 0) this.screen.update(s => s - 1);
+      else if (this.chunk() > 0) this.setChunk(this.chunk() - 1, { type: 'last' });
+    }
   }
 
   onSlider(event: Event): void {
@@ -230,6 +245,19 @@ export class Reader implements OnInit, OnDestroy {
   private observeSize(): void {
     const el = this.stage()?.nativeElement;
     if (!el) return;
+    this.pageTurn = new PageTurn({
+      stage: el,
+      columns: () => this.columns()!.nativeElement,
+      canTurn: dir => this.canAdvance(dir),
+      turn: dir => this.advance(dir),
+      snapshot: () => ({ chunk: this.chunk(), screen: this.screen() }),
+      restore: snap => {
+        const { chunk, screen } = snap as { chunk: number; screen: number };
+        if (chunk === this.chunk()) this.screen.set(screen);
+        else this.setChunk(chunk, { type: 'screen', screen });
+      },
+    });
+    this.pageTurn.attach();
     const update = () => {
       if (this.size().w) this.anchor();
       this.size.set({ w: el.clientWidth, h: el.clientHeight });
@@ -270,6 +298,7 @@ export class Reader implements OnInit, OnDestroy {
     this.pending = { type: 'first' };
     let screen = this.screen();
     if (pending.type === 'last') screen = screens - 1;
+    else if (pending.type === 'screen') screen = pending.screen;
     else if (pending.type === 'index') {
       const target = el.querySelector<HTMLElement>(`[data-i="${pending.index}"]`);
       if (target) screen = this.columnOf(target);

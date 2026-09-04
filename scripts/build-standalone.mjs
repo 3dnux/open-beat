@@ -59,7 +59,7 @@ async function extractBooks() {
 function compileStyles() {
   const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
   const shelf = read('src/app/reader/bookshelf/bookshelf.scss').replace(/:host\s*\{[^}]*\}/g, '');
-  const reader = read('src/app/reader/reader/reader.scss').replace(/:host\s*\{[^}]*\}/g, '').replace(/::ng-deep\s*\{/g, '& {');
+  const reader = read('src/app/reader/reader/reader.scss').replace(/:host\s*\{[^}]*\}/g, '').replace(/([^\s;{}])[ \t]+::ng-deep\s*\{/g, '$1 {').replace(/::ng-deep\s*\{/g, '& {');
   const scss = `${read('src/standalone/app.scss')}\n#app { ${shelf} }\n#app { ${reader} }`;
   return sass.compileString(scss, { style: 'compressed', loadPaths: [ROOT] }).css;
 }

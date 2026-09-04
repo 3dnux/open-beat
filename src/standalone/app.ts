@@ -6,6 +6,7 @@
 import { toBionicHtml, toPlainHtml } from '../app/reader/bionic';
 import { BookCover, DEFAULT_SETTINGS, Paragraph, ReaderFont, ReaderSettings, ReaderTheme, ReadingProgress } from '../app/reader/models';
 import { PageLines, assembleFlow, buildLines } from '../app/reader/pdf-paragraphs';
+import { PageTurn, TurnDirection } from '../app/reader/page-turn';
 
 interface StoredBook {
   id: string;
@@ -278,7 +279,7 @@ class Shelf {
 /* ------------------------------------------------------------------ reader */
 
 interface Chunk { start: number; end: number; }
-type Pending = { type: 'first' } | { type: 'last' } | { type: 'index'; index: number };
+type Pending = { type: 'first' } | { type: 'last' } | { type: 'index'; index: number } | { type: 'screen'; screen: number };
 
 class Reader {
   private flow: Paragraph[];
@@ -296,6 +297,7 @@ class Reader {
   private stage!: HTMLElement;
   private observer?: ResizeObserver;
   private saveTimer?: ReturnType<typeof setTimeout>;
+  private pageTurn?: PageTurn;
   private readonly onKey = (e: KeyboardEvent) => this.key(e);
 
   constructor(private root: HTMLElement, private library: Library, private book: StoredBook) {
@@ -343,10 +345,24 @@ class Reader {
     const index = progress ? Math.min(Math.max(0, progress.index ?? this.indexOfPage(progress.page)), this.flow.length - 1) : 0;
     this.applyTypography();
     this.observeSize();
+    this.pageTurn = new PageTurn({
+      stage: this.stage,
+      columns: () => this.columns,
+      canTurn: dir => dir === 1 ? !this.isLast() : !this.isFirst(),
+      turn: dir => this.advance(dir),
+      snapshot: () => ({ chunk: this.chunk, screen: this.screen }),
+      restore: snap => {
+        const { chunk, screen } = snap as { chunk: number; screen: number };
+        if (chunk === this.chunk) this.setScreen(screen);
+        else this.setChunk(chunk, { type: 'screen', screen });
+      },
+    });
+    this.pageTurn.attach();
     this.goToIndex(index);
   }
 
   unmount(): void {
+    this.pageTurn?.detach();
     window.removeEventListener('keydown', this.onKey);
     this.observer?.disconnect();
     clearTimeout(this.saveTimer);
@@ -490,13 +506,17 @@ class Reader {
   }
 
   /* --- navigation --- */
-  next(): void {
-    if (this.screen < this.screens - 1) this.setScreen(this.screen + 1);
-    else if (this.chunk < this.chunks.length - 1) this.setChunk(this.chunk + 1, { type: 'first' });
-  }
-  prev(): void {
-    if (this.screen > 0) this.setScreen(this.screen - 1);
-    else if (this.chunk > 0) this.setChunk(this.chunk - 1, { type: 'last' });
+  next(): void { this.pageTurn ? this.pageTurn.flip(1) : this.advance(1); }
+  prev(): void { this.pageTurn ? this.pageTurn.flip(-1) : this.advance(-1); }
+
+  private advance(dir: TurnDirection): void {
+    if (dir === 1) {
+      if (this.screen < this.screens - 1) this.setScreen(this.screen + 1);
+      else if (this.chunk < this.chunks.length - 1) this.setChunk(this.chunk + 1, { type: 'first' });
+    } else {
+      if (this.screen > 0) this.setScreen(this.screen - 1);
+      else if (this.chunk > 0) this.setChunk(this.chunk - 1, { type: 'last' });
+    }
   }
 
   private setScreen(screen: number): void {
@@ -553,6 +573,7 @@ class Reader {
     this.pending = { type: 'first' };
     let screen = this.screen;
     if (pending.type === 'last') screen = this.screens - 1;
+    else if (pending.type === 'screen') screen = pending.screen;
     else if (pending.type === 'index') {
       const target = this.columns.querySelector<HTMLElement>(`[data-i="${pending.index}"]`);
       if (target) screen = this.columnOf(target);
