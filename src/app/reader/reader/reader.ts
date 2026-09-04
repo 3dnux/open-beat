@@ -9,6 +9,11 @@ import { LibraryService } from '../library.service';
 import { PdfTextService } from '../pdf-text.service';
 import { toBionicHtml, toPlainHtml } from '../bionic';
 import { PageTurn, TurnDirection } from '../page-turn';
+import { TocEntry, buildToc, chapterEnd, chapterStart } from '../toc';
+import { ReadingSpeed, countWords, formatMinutes } from '../reading-speed';
+import { ReadAloud } from '../speech';
+import { Rsvp, RsvpWord, rsvpWords } from '../rsvp';
+import { highlightRange, rangeForText } from '../text-range';
 
 /** Horizontal gap between screens (CSS columns). */
 const GAP = 48;
@@ -16,6 +21,7 @@ const GAP = 48;
 const MAX_CHUNK = 100;
 /** Do not start a new chunk at a heading if the current one is this short (title pages). */
 const MIN_CHUNK = 4;
+const RSVP_KEY = 'bionic-reader:rsvp-wpm';
 
 interface Chunk { start: number; end: number; }
 type Pending = { type: 'first' } | { type: 'last' } | { type: 'index'; index: number } | { type: 'screen'; screen: number };
@@ -50,8 +56,11 @@ export class Reader implements OnInit, OnDestroy {
   readonly prepared = signal(0);
   readonly error = signal('');
   readonly showSettings = signal(false);
+  readonly showToc = signal(false);
   readonly showChrome = signal(true);
   readonly size = signal({ w: 0, h: 0 });
+  readonly fullscreenEnabled = typeof document !== 'undefined' && !!document.fullscreenEnabled;
+  readonly isFullscreen = signal(false);
 
   readonly html = computed<SafeHtml>(() => {
     // Generated from escaped text only: safe to bypass the sanitizer (keeps data-* attributes).
@@ -99,11 +108,54 @@ export class Reader implements OnInit, OnDestroy {
   readonly isFirst = computed(() => this.chunk() === 0 && this.screen() === 0);
   readonly isLast = computed(() => this.chunk() >= this.chunks().length - 1 && this.screen() >= this.screens() - 1);
 
+  /* ---- table of contents & time left ---- */
+  readonly toc = computed<TocEntry[]>(() => buildToc(this.flow()));
+  readonly currentChapter = computed(() => chapterStart(this.toc(), this.index()));
+  private readonly speed = new ReadingSpeed();
+  /** Bumped whenever the pace estimate changes so `eta` recomputes. */
+  private readonly paceTick = signal(0);
+  readonly eta = computed(() => {
+    this.paceTick();
+    const flow = this.flow();
+    if (!flow.length) return '';
+    const from = this.index();
+    const end = chapterEnd(this.toc(), from, flow.length);
+    const chapter = this.speed.minutesFor(this.wordsOf(from, end));
+    const book = this.speed.minutesFor(this.wordsOf(from, flow.length));
+    return `≈ ${formatMinutes(chapter)} para acabar el capítulo · ${formatMinutes(book)} para acabar el libro`;
+  });
+
+  /* ---- read aloud ---- */
+  readonly ttsOpen = signal(false);
+  readonly ttsMsg = signal('');
+  readonly ttsPlaying = signal(false);
+  readonly ttsRate = signal(1);
+  readonly ttsVoice = signal('');
+  readonly voices = signal<SpeechSynthesisVoice[]>([]);
+  readonly ttsSupported = ReadAloud.supported();
+  private tts?: ReadAloud;
+
+  /* ---- burst mode (RSVP) ---- */
+  readonly rsvpOpen = signal(false);
+  readonly rsvpWord = signal<{ l: string; o: string; r: string }>({ l: '', o: '', r: '' });
+  readonly rsvpProgress = signal(0);
+  readonly rsvpPlaying = signal(false);
+  readonly rsvpWpm = signal(300);
+  readonly rsvpAtEnd = signal(false);
+  private rsvp?: Rsvp;
+  private rsvpWords: RsvpWord[] = [];
+
   readonly themes: { id: ReaderTheme; label: string }[] = [
     { id: 'white', label: 'Blanco' },
     { id: 'sepia', label: 'Sepia' },
     { id: 'green', label: 'Verde' },
     { id: 'dark', label: 'Oscuro' },
+  ];
+  readonly fonts: { id: ReaderFont; label: string; family: string; hint: string }[] = [
+    { id: 'serif', label: 'Literata', family: "'Literata', Georgia, serif", hint: 'Serif clásica' },
+    { id: 'lexend', label: 'Lexend', family: "'Lexend', sans-serif", hint: 'Diseñada para leer con fluidez' },
+    { id: 'atkinson', label: 'Atkinson', family: "'Atkinson Hyperlegible', sans-serif", hint: 'Letras que no se confunden entre sí' },
+    { id: 'sans', label: 'Sistema', family: 'system-ui, sans-serif', hint: 'La fuente del dispositivo' },
   ];
   readonly fixations = [
     { value: 0.35, label: 'Baja' },
@@ -116,6 +168,10 @@ export class Reader implements OnInit, OnDestroy {
   private resizeObserver?: ResizeObserver;
   private saveTimer?: ReturnType<typeof setTimeout>;
   private pageTurn?: PageTurn;
+  private wakeLock?: { release(): Promise<void> };
+  private readonly chunkWords = new Map<number, number>();
+  private readonly onVisibility = () => { if (document.hidden) this.speed.pause(); else this.requestWakeLock(); };
+  private readonly onFullscreen = () => this.isFullscreen.set(!!document.fullscreenElement);
 
   constructor() {
     // Re-measure whenever the content, the viewport or the typography change.
@@ -124,13 +180,15 @@ export class Reader implements OnInit, OnDestroy {
       this.size();
       requestAnimationFrame(() => this.measure());
     });
-    // Keep the anchor paragraph up to date and persist the position.
+    // Keep the anchor paragraph up to date, time the pace and persist the position.
     effect(() => {
       const screen = this.screen();
       const flow = this.flow();
       if (!this.id || !flow.length) return;
       const top = this.topIndex(screen);
       if (top !== null) this.index.set(top);
+      this.speed.screenShown(this.wordsPerScreen());
+      this.paceTick.update(n => n + 1);
       clearTimeout(this.saveTimer);
       this.saveTimer = setTimeout(() => this.save(), 300);
     });
@@ -145,6 +203,8 @@ export class Reader implements OnInit, OnDestroy {
     }
     this.book.set(book);
     this.observeSize();
+    document.addEventListener('visibilitychange', this.onVisibility);
+    document.addEventListener('fullscreenchange', this.onFullscreen);
     try {
       const doc = await this.pdf.open(book.id, book.src ?? book.data!);
       this.totalPages.set(doc.numPages);
@@ -156,6 +216,7 @@ export class Reader implements OnInit, OnDestroy {
       let index = progress?.index ?? 0;
       if (progress && progress.index === undefined) index = this.indexOfPage(progress.page);
       this.goToIndex(Math.min(Math.max(0, index), flow.length - 1));
+      this.requestWakeLock();
     } catch (e) {
       this.error.set('No se pudo abrir el PDF.' + (e instanceof Error && e.message ? ` (${e.message})` : ''));
     } finally {
@@ -164,6 +225,12 @@ export class Reader implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.tts?.stop();
+    this.rsvp?.pause();
+    this.speed.pause();
+    this.wakeLock?.release().catch(() => undefined);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    document.removeEventListener('fullscreenchange', this.onFullscreen);
     this.pageTurn?.detach();
     this.resizeObserver?.disconnect();
     clearTimeout(this.saveTimer);
@@ -175,16 +242,21 @@ export class Reader implements OnInit, OnDestroy {
 
   @HostListener('window:keydown', ['$event'])
   onKey(event: KeyboardEvent): void {
-    if (event.target instanceof HTMLInputElement) return;
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+    if (this.rsvpOpen()) {
+      if (event.key === 'Escape') this.closeRsvp();
+      else if (event.key === ' ') { this.rsvpToggle(); event.preventDefault(); }
+      return;
+    }
     switch (event.key) {
       case 'ArrowRight': case 'PageDown': case ' ': this.next(); event.preventDefault(); break;
       case 'ArrowLeft': case 'PageUp': this.prev(); event.preventDefault(); break;
-      case 'Escape': this.showSettings.set(false); break;
+      case 'Escape': this.showSettings.set(false); this.showToc.set(false); break;
     }
   }
 
   onTap(event: MouseEvent): void {
-    if (this.showSettings()) { this.showSettings.set(false); return; }
+    if (this.showSettings() || this.showToc()) { this.showSettings.set(false); this.showToc.set(false); return; }
     const el = this.stage()?.nativeElement;
     if (!el) return;
     const x = (event.clientX - el.getBoundingClientRect().left) / el.clientWidth;
@@ -222,10 +294,15 @@ export class Reader implements OnInit, OnDestroy {
     if (page !== this.page()) this.goToIndex(this.indexOfPage(page));
   }
 
+  toggleSettings(): void { this.showToc.set(false); this.showSettings.update(v => !v); }
+  toggleToc(): void { this.showSettings.set(false); this.showToc.update(v => !v); }
+  goToChapter(index: number): void { this.showToc.set(false); this.goToIndex(index); }
+
   toggleBionic(): void { this.anchor(); this.library.updateSettings({ bionic: !this.settings().bionic }); }
   setTheme(theme: ReaderTheme): void { this.library.updateSettings({ theme }); }
   setFont(font: ReaderFont): void { this.anchor(); this.library.updateSettings({ font }); }
   setFixation(fixation: number): void { this.anchor(); this.library.updateSettings({ fixation }); }
+  setWarmth(event: Event): void { this.library.updateSettings({ warmth: Number((event.target as HTMLInputElement).value) }); }
   fontSize(delta: number): void {
     this.anchor();
     this.library.updateSettings({ fontSize: Math.min(34, Math.max(14, this.settings().fontSize + delta)) });
@@ -234,6 +311,146 @@ export class Reader implements OnInit, OnDestroy {
     this.anchor();
     const lineHeight = Math.round(Math.min(2.2, Math.max(1.2, this.settings().lineHeight + delta)) * 10) / 10;
     this.library.updateSettings({ lineHeight });
+  }
+  toggleFullscreen(): void {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
+    else document.documentElement.requestFullscreen().catch(() => undefined);
+  }
+
+  /* ---- read aloud ---- */
+  toggleTts(): void {
+    const open = !this.ttsOpen();
+    this.ttsOpen.set(open);
+    if (open) {
+      this.ensureTts();
+      this.voices.set(ReadAloud.voices());
+    } else {
+      this.tts?.stop();
+      this.clearSpeaking();
+      this.ttsPlaying.set(false);
+    }
+  }
+  ttsPlayPause(): void {
+    const tts = this.ensureTts();
+    this.ttsMsg.set('');
+    if (!tts.active) tts.start(this.index());
+    else if (tts.isPaused) tts.resume();
+    else tts.pause();
+    this.ttsPlaying.set(tts.active && !tts.isPaused);
+  }
+  ttsStop(): void { this.tts?.stop(); this.clearSpeaking(); this.ttsPlaying.set(false); }
+  ttsChangeRate(delta: number): void {
+    const tts = this.ensureTts();
+    tts.rate = Math.round(Math.min(2, Math.max(0.6, tts.rate + delta)) * 10) / 10;
+    this.ttsRate.set(tts.rate);
+    if (tts.active) tts.start(tts.current);
+  }
+  ttsSetVoice(event: Event): void {
+    const tts = this.ensureTts();
+    tts.voiceName = (event.target as HTMLSelectElement).value;
+    this.ttsVoice.set(tts.voiceName);
+    if (tts.active) tts.start(tts.current);
+  }
+  private ensureTts(): ReadAloud {
+    if (!this.tts) {
+      this.tts = new ReadAloud(i => this.flow()[i]?.text, {
+        paragraph: i => this.showSpeaking(i),
+        word: (i, start, end) => {
+          const el = this.columnsEl()?.querySelector<HTMLElement>(`[data-i="${i}"]`);
+          highlightRange('tts-word', el ? rangeForText(el, start, end) : null);
+        },
+        end: () => { this.clearSpeaking(); this.ttsPlaying.set(false); },
+        error: msg => { this.ttsMsg.set(msg); this.clearSpeaking(); this.ttsPlaying.set(false); },
+      });
+      if (ReadAloud.supported()) speechSynthesis.addEventListener('voiceschanged', () => this.voices.set(ReadAloud.voices()), { once: true });
+    }
+    return this.tts;
+  }
+  private showSpeaking(i: number): void {
+    this.clearSpeaking();
+    const root = this.columnsEl();
+    let el = root?.querySelector<HTMLElement>(`[data-i="${i}"]`) ?? null;
+    const c = this.chunks()[this.chunk()];
+    if (!el || i < c.start || i >= c.end || this.columnOf(el) !== this.screen()) {
+      if (el && i >= c.start && i < c.end) this.screen.set(this.columnOf(el));
+      else { this.goToIndex(i); el = null; }
+    }
+    if (el) el.classList.add('speaking');
+    else setTimeout(() => this.columnsEl()?.querySelector(`[data-i="${i}"]`)?.classList.add('speaking'), 60);
+  }
+  private clearSpeaking(): void {
+    highlightRange('tts-word', null);
+    this.columnsEl()?.querySelectorAll('.speaking').forEach(e => e.classList.remove('speaking'));
+  }
+
+  /* ---- burst mode ---- */
+  openRsvp(): void {
+    this.showSettings.set(false);
+    this.ttsStop();
+    this.rsvpWords = rsvpWords(this.flow(), this.index());
+    if (!this.rsvpWords.length) return;
+    let wpm = 300;
+    try { wpm = Number(localStorage.getItem(RSVP_KEY)) || 300; } catch { /* ignore */ }
+    this.rsvp = new Rsvp(this.rsvpWords, (w, pos) => this.showRsvpWord(w, pos), () => { this.rsvpPlaying.set(false); this.rsvpAtEnd.set(true); });
+    this.rsvp.wpm = wpm;
+    this.rsvpWpm.set(wpm);
+    this.rsvpAtEnd.set(false);
+    this.rsvpOpen.set(true);
+    this.rsvp.seek(0);
+    this.rsvp.play();
+    this.rsvpPlaying.set(true);
+  }
+  rsvpToggle(): void {
+    if (!this.rsvp) return;
+    if (this.rsvp.playing) this.rsvp.pause(); else this.rsvp.play();
+    this.rsvpPlaying.set(this.rsvp.playing);
+  }
+  rsvpBack(): void { this.rsvp?.back(); }
+  rsvpStep(delta: number): void { this.rsvpSetWpm(this.rsvpWpm() + delta); }
+  rsvpSlider(event: Event): void { this.rsvpSetWpm(Number((event.target as HTMLInputElement).value)); }
+  private rsvpSetWpm(wpm: number): void {
+    wpm = Math.min(800, Math.max(100, wpm));
+    if (this.rsvp) this.rsvp.wpm = wpm;
+    this.rsvpWpm.set(wpm);
+    try { localStorage.setItem(RSVP_KEY, String(wpm)); } catch { /* ignore */ }
+  }
+  closeRsvp(): void {
+    const r = this.rsvp;
+    if (!r) return;
+    r.pause();
+    const w = this.rsvpWords[r.position];
+    this.rsvp = undefined;
+    this.rsvpOpen.set(false);
+    if (w && w.paragraph !== this.index()) this.goToIndex(w.paragraph);
+  }
+  private showRsvpWord(w: RsvpWord, pos: number): void {
+    const letters = Array.from(w.text);
+    this.rsvpWord.set({ l: letters.slice(0, w.orp).join(''), o: letters[w.orp] ?? '', r: letters.slice(w.orp + 1).join('') });
+    this.rsvpProgress.set((pos / Math.max(1, this.rsvpWords.length - 1)) * 100);
+  }
+
+  /* ---- helpers ---- */
+  private columnsEl(): HTMLElement | undefined { return this.columns()?.nativeElement; }
+
+  private wordsOf(from: number, to: number): number {
+    const flow = this.flow();
+    let n = 0;
+    for (let i = from; i < to; i++) n += countWords(flow[i].text);
+    return n;
+  }
+  private wordsPerScreen(): number {
+    const c = this.chunks()[this.chunk()];
+    if (!c) return 1;
+    let words = this.chunkWords.get(this.chunk());
+    if (words === undefined) { words = this.wordsOf(c.start, c.end); this.chunkWords.set(this.chunk(), words); }
+    return Math.max(1, Math.round(words / Math.max(1, this.screens())));
+  }
+  private async requestWakeLock(): Promise<void> {
+    try {
+      const nav = navigator as Navigator & { wakeLock?: { request(type: 'screen'): Promise<{ release(): Promise<void> }> } };
+      if (!nav.wakeLock || document.hidden) return;
+      this.wakeLock = await nav.wakeLock.request('screen');
+    } catch { /* not allowed here */ }
   }
 
   /** Keep the current paragraph on screen across typography changes. */
@@ -298,7 +515,7 @@ export class Reader implements OnInit, OnDestroy {
 
   /** Flow index of the paragraph at the top of the given screen (null when not rendered yet). */
   private topIndex(screen: number): number | null {
-    const root = this.columns()?.nativeElement;
+    const root = this.columnsEl();
     if (!root || !this.size().w) return null;
     // First paragraph starting on this screen, or the one flowing into it from the previous screen.
     let found: number | null = null;
@@ -312,7 +529,7 @@ export class Reader implements OnInit, OnDestroy {
   }
 
   private measure(): void {
-    const el = this.columns()?.nativeElement;
+    const el = this.columnsEl();
     const { w } = this.size();
     if (!el || !w) return;
     const screens = Math.max(1, Math.round((el.scrollWidth + GAP) / (w + GAP)));

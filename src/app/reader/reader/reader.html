@@ -1,6 +1,6 @@
 <div class="reader" [attr.data-theme]="settings().theme" [class.chrome-hidden]="!showChrome()"
      [style.--font-size.px]="settings().fontSize" [style.--line-height]="settings().lineHeight"
-     [class.sans]="settings().font === 'sans'">
+     [class.sans]="settings().font === 'sans'" [class.lexend]="settings().font === 'lexend'" [class.atkinson]="settings().font === 'atkinson'">
 
   <header class="bar top">
     <a routerLink="/biblioteca" class="icon-btn" aria-label="Volver a la biblioteca">
@@ -11,11 +11,13 @@
       @if (book()?.author) { <span class="a">{{ book()?.author }}</span> }
     </div>
     <div class="actions">
-      <button type="button" class="icon-btn bionic" [class.on]="settings().bionic" (click)="toggleBionic()"
-              [attr.aria-pressed]="settings().bionic" title="Lectura biónica">
-        <b>Bi</b>ónico
+      <button type="button" class="icon-btn toc-btn" (click)="toggleToc()" aria-label="Índice" title="Índice">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor"><path d="M320-240v-80h480v80H320Zm0-200v-80h480v80H320Zm0-200v-80h480v80H320ZM160-200q-33 0-56.5-23.5T80-280q0-33 23.5-56.5T160-360q33 0 56.5 23.5T240-280q0 33-23.5 56.5T160-200Zm0-200q-33 0-56.5-23.5T80-480q0-33 23.5-56.5T160-560q33 0 56.5 23.5T240-480q0 33-23.5 56.5T160-400Zm0-200q-33 0-56.5-23.5T80-680q0-33 23.5-56.5T160-760q33 0 56.5 23.5T240-680q0 33-23.5 56.5T160-600Z"/></svg>
       </button>
-      <button type="button" class="icon-btn aa" (click)="showSettings.set(!showSettings())" aria-label="Ajustes de lectura">Aa</button>
+      <button type="button" class="icon-btn voice" [class.on]="ttsOpen()" (click)="toggleTts()" aria-label="Leer en voz alta" title="Leer en voz alta">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor"><path d="M560-131v-82q90-26 145-100t55-168q0-94-55-168T560-749v-82q124 28 202 125.5T840-481q0 127-78 224.5T560-131ZM120-360v-240h160l200-200v640L280-360H120Zm440 40v-322q47 22 73.5 66t26.5 96q0 51-26.5 94.5T560-320Z"/></svg>
+      </button>
+      <button type="button" class="icon-btn aa" (click)="toggleSettings()" aria-label="Ajustes de lectura">Aa</button>
     </div>
   </header>
 
@@ -31,10 +33,15 @@
         </div>
       </div>
       <div class="row">
+        <span class="label">Luz cálida</span>
+        <input type="range" class="warm" min="0" max="100" [value]="settings().warmth" (input)="setWarmth($event)" aria-label="Luz cálida" />
+      </div>
+      <div class="row">
         <span class="label">Fuente</span>
-        <div class="seg">
-          <button type="button" [class.active]="settings().font === 'serif'" (click)="setFont('serif')" style="font-family: 'Literata', Georgia, serif">Serif</button>
-          <button type="button" [class.active]="settings().font === 'sans'" (click)="setFont('sans')" style="font-family: system-ui, sans-serif">Sans</button>
+        <div class="seg fonts">
+          @for (f of fonts; track f.id) {
+            <button type="button" [class.active]="settings().font === f.id" (click)="setFont(f.id)" [style.font-family]="f.family" [title]="f.hint">{{ f.label }}</button>
+          }
         </div>
       </div>
       <div class="row">
@@ -68,7 +75,31 @@
           }
         </div>
       </div>
+      <div class="row">
+        <span class="label">Modo ráfaga</span>
+        <button type="button" (click)="openRsvp()" title="Una palabra a la vez, a la velocidad que elijas">Leer palabra a palabra</button>
+      </div>
+      @if (fullscreenEnabled) {
+        <div class="row">
+          <span class="label">Pantalla</span>
+          <button type="button" (click)="toggleFullscreen()">{{ isFullscreen() ? 'Salir de pantalla completa' : 'Pantalla completa' }}</button>
+        </div>
+      }
     </div>
+  }
+
+  @if (showToc()) {
+    <nav class="toc" aria-label="Índice">
+      <h3>Índice</h3>
+      @for (e of toc(); track e.index) {
+        <button type="button" [class.l1]="e.level === 1" [class.l2]="e.level === 2" [class.current]="e.index === currentChapter()" (click)="goToChapter(e.index)">
+          <span class="t">{{ e.title }}@if (e.subtitle) {<span class="s">{{ e.subtitle }}</span>}</span>
+          <span class="pg">{{ e.page }}</span>
+        </button>
+      } @empty {
+        <p class="empty">Este libro no tiene capítulos detectados.</p>
+      }
+    </nav>
   }
 
   <main class="viewport" (click)="onTap($event)">
@@ -91,6 +122,26 @@
     </div>
   </main>
 
+  @if (ttsOpen()) {
+    <div class="tts" role="region" aria-label="Lectura en voz alta">
+      <button type="button" class="play" (click)="ttsPlayPause()" [attr.aria-label]="ttsPlaying() ? 'Pausar' : 'Leer'">{{ ttsPlaying() ? '❚❚' : '▶' }}</button>
+      <button type="button" class="sec" (click)="ttsStop()">Detener</button>
+      <div class="rate">
+        <button type="button" class="sec" (click)="ttsChangeRate(-0.1)" aria-label="Más lento">−</button>
+        <span>{{ ttsRate().toFixed(1) }}×</span>
+        <button type="button" class="sec" (click)="ttsChangeRate(0.1)" aria-label="Más rápido">+</button>
+      </div>
+      @if (voices().length) {
+        <select (change)="ttsSetVoice($event)" aria-label="Voz">
+          @for (v of voices(); track v.name) { <option [value]="v.name" [selected]="v.name === ttsVoice()">{{ v.name }} ({{ v.lang }})</option> }
+        </select>
+      }
+      @if (ttsMsg()) { <span class="msg">{{ ttsMsg() }}</span> }
+      @else if (!ttsSupported) { <span class="msg">Este navegador no puede leer en voz alta.</span> }
+      @else if (!voices().length) { <span class="msg">No hay voces instaladas en este dispositivo.</span> }
+    </div>
+  }
+
   <footer class="bar bottom">
     <input class="slider" type="range" min="1" [max]="totalPages() || 1" [value]="page()" (change)="onSlider($event)"
            [style.--p.%]="percent()" aria-label="Ir a página" />
@@ -99,5 +150,34 @@
       <span>Página {{ page() }} de {{ totalPages() || '…' }} · {{ percent() }}%</span>
       <button type="button" class="nav" (click)="next()" [disabled]="isLast()" aria-label="Página siguiente">›</button>
     </div>
+    <div class="eta">{{ eta() }}</div>
   </footer>
+
+  <div class="warmth" [style.opacity]="settings().warmth / 100 * 0.45"></div>
+
+  @if (rsvpOpen()) {
+    <div class="rsvp" role="dialog" aria-label="Modo ráfaga">
+      <div class="rsvp-top">
+        <span>Modo ráfaga · una palabra a la vez</span>
+        <button type="button" class="icon-btn" (click)="closeRsvp()" aria-label="Cerrar">✕</button>
+      </div>
+      <div class="rsvp-stage" (click)="rsvpToggle()">
+        <div class="rsvp-rule rule-top"></div>
+        <div class="rsvp-word"><span class="l">{{ rsvpWord().l }}</span><span class="o">{{ rsvpWord().o }}</span><span class="r">{{ rsvpWord().r }}</span></div>
+        <div class="rsvp-rule rule-bottom"></div>
+        <div class="rsvp-hint">Toca para pausar o continuar. Por encima de 400 ppm la comprensión baja.</div>
+      </div>
+      <div class="rsvp-bar"><i [style.width.%]="rsvpProgress()"></i></div>
+      <div class="rsvp-controls">
+        <button type="button" (click)="rsvpBack()" title="Frase anterior">↺ Frase</button>
+        <button type="button" class="play" (click)="rsvpToggle()">{{ rsvpPlaying() ? 'Pausar' : (rsvpAtEnd() ? 'Fin' : 'Continuar') }}</button>
+        <div class="wpm">
+          <button type="button" (click)="rsvpStep(-25)" aria-label="Más lento">−</button>
+          <input type="range" min="100" max="800" step="25" [value]="rsvpWpm()" (input)="rsvpSlider($event)" aria-label="Palabras por minuto" />
+          <span>{{ rsvpWpm() }} ppm</span>
+          <button type="button" (click)="rsvpStep(25)" aria-label="Más rápido">+</button>
+        </div>
+      </div>
+    </div>
+  }
 </div>

@@ -22,7 +22,12 @@ Además del modo DJ, Open Beat incluye un lector de libros con **lectura biónic
 - **Librero** (`/biblioteca`): un estante con tres libros de dominio público en español (Project Gutenberg): *Vida de Lazarillo de Tormes* (anónimo, 1554), *Marianela* (Benito Pérez Galdós, 1878) y *Cuentos de amor, de locura y de muerte* (Horacio Quiroga, 1917). Al tocar un libro se abre el lector; el progreso de lectura se muestra sobre la portada.
 - **Añadir PDF**: el último hueco del estante permite abrir cualquier PDF propio. Se guarda en el navegador (IndexedDB) y aparece en el librero en las siguientes visitas.
 - **Lector** (`/leer/:id`): aspecto tipo Kindle. El texto del PDF se extrae con [pdf.js](https://mozilla.github.io/pdf.js/), se reconstruyen párrafos, títulos y subtítulos (también los cortados entre páginas) y se pagina en pantallas completas capítulo a capítulo. Se pasa de página deslizando el dedo (o arrastrando con el ratón), con el deslizamiento horizontal de la app de Kindle, tocando los bordes, con las flechas del teclado o con la barra de progreso.
-- **Ajustes (Aa)**: activar o desactivar el formato biónico y su intensidad (baja, media, alta), fuente serif o sans, tamaño, interlineado y tema (blanco, sepia, verde, oscuro). La posición de lectura y los ajustes se recuerdan.
+- **Ajustes (Aa)**: activar o desactivar el formato biónico y su intensidad (baja, media, alta); fuentes Literata, Lexend, Atkinson Hyperlegible o la del sistema; tamaño, interlineado, tema (blanco, sepia, verde, oscuro), luz cálida y pantalla completa. La posición de lectura y los ajustes se recuerdan.
+- **Índice**: lista de capítulos detectados en el PDF (con subtítulos) para saltar entre ellos.
+- **Tiempo restante**: estimación de minutos para acabar el capítulo y el libro, a partir del ritmo real de lectura medido con cada página.
+- **Leer en voz alta**: síntesis de voz del navegador con resaltado del párrafo y de la palabra que se está leyendo, velocidad y voz configurables.
+- **Modo ráfaga**: lectura palabra a palabra (RSVP) con la letra de fijación resaltada y velocidad ajustable de 100 a 800 palabras por minuto; al salir, el lector queda donde se detuvo.
+- La pantalla no se apaga mientras se lee (Wake Lock) en los navegadores que lo permiten.
 
 **Versión autónoma (un solo archivo).** `node scripts/build-standalone.mjs` genera `dist/standalone/librero-bionico.html`: el librero y el lector sin Angular, con el texto de los tres libros ya extraído y pdf.js incrustado, listo para publicar en cualquier sitio estático o abrir directamente desde el disco.
 

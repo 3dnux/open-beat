@@ -7,6 +7,11 @@ import { toBionicHtml, toPlainHtml } from '../app/reader/bionic';
 import { BookCover, DEFAULT_SETTINGS, Paragraph, ReaderFont, ReaderSettings, ReaderTheme, ReadingProgress } from '../app/reader/models';
 import { PageLines, assembleFlow, buildLines } from '../app/reader/pdf-paragraphs';
 import { PageTurn, TurnDirection } from '../app/reader/page-turn';
+import { TocEntry, buildToc, chapterEnd, chapterStart } from '../app/reader/toc';
+import { ReadingSpeed, countWords, formatMinutes } from '../app/reader/reading-speed';
+import { ReadAloud } from '../app/reader/speech';
+import { Rsvp, RsvpWord, rsvpWords } from '../app/reader/rsvp';
+import { highlightRange, rangeForText } from '../app/reader/text-range';
 
 interface StoredBook {
   id: string;
@@ -298,11 +303,21 @@ class Reader {
   private observer?: ResizeObserver;
   private saveTimer?: ReturnType<typeof setTimeout>;
   private pageTurn?: PageTurn;
+  private readonly toc: TocEntry[];
+  private readonly speed = new ReadingSpeed();
+  private showToc = false;
+  private tts?: ReadAloud;
+  private ttsOpen = false;
+  private ttsMsg = '';
+  private rsvp?: Rsvp;
+  private wakeLock?: { release(): Promise<void> };
   private readonly onKey = (e: KeyboardEvent) => this.key(e);
+  private readonly onVisibility = () => { if (document.hidden) this.speed.pause(); else this.requestWakeLock(); };
 
   constructor(private root: HTMLElement, private library: Library, private book: StoredBook) {
     this.flow = book.flow;
     this.chunks = buildChunks(this.flow);
+    this.toc = buildToc(this.flow);
   }
 
   mount(): void {
@@ -315,12 +330,19 @@ class Reader {
     </a>
     <div class="book-title"><span class="t">${esc(this.book.title)}</span><span class="a">${esc(this.book.author)}</span></div>
     <div class="actions">
-      <button type="button" class="icon-btn bionic" data-act="bionic" title="Lectura biónica"><b>Bi</b>ónico</button>
+      <button type="button" class="icon-btn toc-btn" data-act="toc" aria-label="Índice" title="Índice">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor"><path d="M320-240v-80h480v80H320Zm0-200v-80h480v80H320Zm0-200v-80h480v80H320ZM160-200q-33 0-56.5-23.5T80-280q0-33 23.5-56.5T160-360q33 0 56.5 23.5T240-280q0 33-23.5 56.5T160-200Zm0-200q-33 0-56.5-23.5T80-480q0-33 23.5-56.5T160-560q33 0 56.5 23.5T240-480q0 33-23.5 56.5T160-400Zm0-200q-33 0-56.5-23.5T80-680q0-33 23.5-56.5T160-760q33 0 56.5 23.5T240-680q0 33-23.5 56.5T160-600Z"/></svg>
+      </button>
+      <button type="button" class="icon-btn voice" data-act="voice" aria-label="Leer en voz alta" title="Leer en voz alta">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor"><path d="M560-131v-82q90-26 145-100t55-168q0-94-55-168T560-749v-82q124 28 202 125.5T840-481q0 127-78 224.5T560-131ZM120-360v-240h160l200-200v640L280-360H120Zm440 40v-322q47 22 73.5 66t26.5 96q0 51-26.5 94.5T560-320Z"/></svg>
+      </button>
       <button type="button" class="icon-btn aa" data-act="settings" aria-label="Ajustes de lectura">Aa</button>
     </div>
   </header>
   <div class="settings-slot"></div>
+  <div class="toc-slot"></div>
   <main class="viewport"><div class="stage"><div class="columns" lang="es"></div></div></main>
+  <div class="tts-slot"></div>
   <footer class="bar bottom">
     <input class="slider" type="range" min="1" max="${this.book.pages || 1}" value="1" aria-label="Ir a página" />
     <div class="status">
@@ -328,18 +350,20 @@ class Reader {
       <span class="status-text"></span>
       <button type="button" class="nav" data-act="next" aria-label="Página siguiente">›</button>
     </div>
+    <div class="eta"></div>
   </footer>
+  <div class="warmth"></div>
+  <div class="rsvp-slot"></div>
 </div>`;
     this.el = $('.reader', this.root);
     this.columns = $('.columns', this.el);
     this.stage = $('.stage', this.el);
 
     this.el.addEventListener('click', e => this.click(e));
-    $<HTMLInputElement>('.slider', this.el).addEventListener('change', e => {
-      const page = Number((e.target as HTMLInputElement).value);
-      if (page !== this.page()) this.goToIndex(this.indexOfPage(page));
-    });
+    this.el.addEventListener('input', e => this.input(e));
+    this.el.addEventListener('change', e => this.change(e));
     window.addEventListener('keydown', this.onKey);
+    document.addEventListener('visibilitychange', this.onVisibility);
 
     const progress = this.library.progress(this.book.id);
     const index = progress ? Math.min(Math.max(0, progress.index ?? this.indexOfPage(progress.page)), this.flow.length - 1) : 0;
@@ -362,9 +386,15 @@ class Reader {
     });
     this.pageTurn.attach();
     this.goToIndex(index);
+    this.requestWakeLock();
   }
 
   unmount(): void {
+    this.tts?.stop();
+    this.rsvp?.pause();
+    this.speed.pause();
+    this.wakeLock?.release().catch(() => undefined);
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.pageTurn?.detach();
     window.removeEventListener('keydown', this.onKey);
     this.observer?.disconnect();
@@ -384,21 +414,46 @@ class Reader {
 
   /* --- events --- */
   private key(e: KeyboardEvent): void {
-    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (this.rsvp) {
+      if (e.key === 'Escape') this.closeRsvp();
+      else if (e.key === ' ') { this.rsvp.playing ? this.rsvp.pause() : this.rsvp.play(); this.renderRsvpControls(); e.preventDefault(); }
+      return;
+    }
     switch (e.key) {
       case 'ArrowRight': case 'PageDown': case ' ': this.next(); e.preventDefault(); break;
       case 'ArrowLeft': case 'PageUp': this.prev(); e.preventDefault(); break;
-      case 'Escape': this.toggleSettings(false); break;
+      case 'Escape': this.toggleSettings(false); this.toggleToc(false); break;
     }
+  }
+
+  private change(e: Event): void {
+    const t = e.target as HTMLElement;
+    if (t.classList.contains('slider')) {
+      const page = Number((t as HTMLInputElement).value);
+      if (page !== this.page()) this.goToIndex(this.indexOfPage(page));
+    } else if (t.dataset['act'] === 'tts-voice' && this.tts) {
+      this.tts.voiceName = (t as HTMLSelectElement).value;
+      if (this.tts.active) this.tts.start(this.tts.current);
+    } else if (t.dataset['act'] === 'bionic') {
+      this.action('bionic', t);
+    }
+  }
+
+  private input(e: Event): void {
+    const t = e.target as HTMLInputElement;
+    if (t.dataset['act'] === 'warmth') { this.library.updateSettings({ warmth: Number(t.value) }); this.applyWarmth(); }
+    else if (t.dataset['act'] === 'rsvp-wpm' && this.rsvp) { this.rsvp.wpm = Number(t.value); $('.rsvp .wpm span', this.el).textContent = `${this.rsvp.wpm} ppm`; }
   }
 
   private click(e: MouseEvent): void {
     const target = e.target as HTMLElement;
-    const act = target.closest<HTMLElement>('[data-act]')?.dataset['act'];
-    if (act) { this.action(act, target.closest<HTMLElement>('[data-act]')!); return; }
-    if (target.closest('.settings')) return;
+    const actEl = target.closest<HTMLElement>('[data-act]');
+    const act = actEl?.dataset['act'];
+    if (act && !(actEl instanceof HTMLInputElement) && !(actEl instanceof HTMLSelectElement)) { this.action(act, actEl!); return; }
+    if (target.closest('.settings, .toc, .tts, .rsvp')) return;
     if (!target.closest('.viewport')) return;
-    if (this.showSettings) { this.toggleSettings(false); return; }
+    if (this.showSettings || this.showToc) { this.toggleSettings(false); this.toggleToc(false); return; }
     const r = this.stage.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width;
     if (x < 0.3) this.prev();
@@ -411,7 +466,19 @@ class Reader {
     switch (act) {
       case 'prev': this.prev(); break;
       case 'next': this.next(); break;
-      case 'settings': this.toggleSettings(!this.showSettings); break;
+      case 'settings': this.toggleToc(false); this.toggleSettings(!this.showSettings); break;
+      case 'toc': this.toggleSettings(false); this.toggleToc(!this.showToc); break;
+      case 'toc-go': this.toggleToc(false); this.goToIndex(Number(el.dataset['value'])); break;
+      case 'voice': this.toggleTts(!this.ttsOpen); break;
+      case 'tts-play': this.ttsPlayPause(); break;
+      case 'tts-stop': this.tts?.stop(); this.clearSpeaking(); this.renderTts(); break;
+      case 'tts-rate': if (this.tts) { this.tts.rate = Math.round(Math.min(2, Math.max(0.6, this.tts.rate + Number(el.dataset['value']))) * 10) / 10; if (this.tts.active) this.tts.start(this.tts.current); this.renderTts(); } break;
+      case 'rsvp': this.toggleSettings(false); this.openRsvp(); break;
+      case 'rsvp-close': this.closeRsvp(); break;
+      case 'rsvp-play': if (this.rsvp) { this.rsvp.playing ? this.rsvp.pause() : this.rsvp.play(); this.renderRsvpControls(); } break;
+      case 'rsvp-back': this.rsvp?.back(); break;
+      case 'rsvp-step': if (this.rsvp) { this.rsvp.wpm = Math.min(800, Math.max(100, this.rsvp.wpm + Number(el.dataset['value']))); this.renderRsvpControls(); } break;
+      case 'fullscreen': this.toggleFullscreen(); break;
       case 'bionic': this.anchor(); this.library.updateSettings({ bionic: !s.bionic }); this.applyTypography(); break;
       case 'theme': this.library.updateSettings({ theme: el.dataset['value'] as ReaderTheme }); this.applyTypography(); break;
       case 'font': this.anchor(); this.library.updateSettings({ font: el.dataset['value'] as ReaderFont }); this.applyTypography(); break;
@@ -437,9 +504,14 @@ class Reader {
   <div class="row"><span class="label">Tema</span><div class="themes">
     ${themes.map(([id, label]) => `<button type="button" class="theme${s.theme === id ? ' active' : ''}" data-theme="${id}" data-act="theme" data-value="${id}" title="${label}">Aa</button>`).join('')}
   </div></div>
-  <div class="row"><span class="label">Fuente</span><div class="seg">
-    <button type="button" class="${s.font === 'serif' ? 'active' : ''}" data-act="font" data-value="serif" style="font-family:'Literata',Georgia,serif">Serif</button>
-    <button type="button" class="${s.font === 'sans' ? 'active' : ''}" data-act="font" data-value="sans" style="font-family:system-ui,sans-serif">Sans</button>
+  <div class="row"><span class="label">Luz cálida</span>
+    <input type="range" class="warm" min="0" max="100" value="${s.warmth}" data-act="warmth" aria-label="Luz cálida" />
+  </div>
+  <div class="row"><span class="label">Fuente</span><div class="seg fonts">
+    <button type="button" class="${s.font === 'serif' ? 'active' : ''}" data-act="font" data-value="serif" style="font-family:'Literata',Georgia,serif" title="Serif clásica">Literata</button>
+    <button type="button" class="${s.font === 'lexend' ? 'active' : ''}" data-act="font" data-value="lexend" style="font-family:'Lexend',sans-serif" title="Diseñada para leer con fluidez">Lexend</button>
+    <button type="button" class="${s.font === 'atkinson' ? 'active' : ''}" data-act="font" data-value="atkinson" style="font-family:'Atkinson Hyperlegible',sans-serif" title="Letras que no se confunden entre sí">Atkinson</button>
+    <button type="button" class="${s.font === 'sans' ? 'active' : ''}" data-act="font" data-value="sans" style="font-family:system-ui,sans-serif">Sistema</button>
   </div></div>
   <div class="row"><span class="label">Tamaño</span><div class="stepper">
     <button type="button" data-act="size" data-value="-2" aria-label="Reducir texto">A−</button><span>${s.fontSize}</span><button type="button" data-act="size" data-value="2" aria-label="Aumentar texto">A+</button>
@@ -453,6 +525,8 @@ class Reader {
   <div class="row${s.bionic ? '' : ' disabled'}"><span class="label">Intensidad</span><div class="seg">
     ${fixations.map(([v, label]) => `<button type="button" class="${s.fixation === v ? 'active' : ''}" data-act="fixation" data-value="${v}" ${s.bionic ? '' : 'disabled'}>${label}</button>`).join('')}
   </div></div>
+  <div class="row"><span class="label">Modo ráfaga</span><button type="button" data-act="rsvp" title="Una palabra a la vez, a la velocidad que elijas">Leer palabra a palabra</button></div>
+  ${document.fullscreenEnabled ? `<div class="row"><span class="label">Pantalla</span><button type="button" data-act="fullscreen">${document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa'}</button></div>` : ''}
 </div>`;
   }
 
@@ -460,10 +534,10 @@ class Reader {
   private applyTypography(): void {
     const s = this.library.settings;
     this.el.dataset['theme'] = s.theme;
-    this.el.classList.toggle('sans', s.font === 'sans');
+    for (const f of ['sans', 'lexend', 'atkinson']) this.el.classList.toggle(f, s.font === f);
+    this.applyWarmth();
     this.el.style.setProperty('--font-size', s.fontSize + 'px');
     this.el.style.setProperty('--line-height', String(s.lineHeight));
-    $('.icon-btn.bionic', this.el).classList.toggle('on', s.bionic);
     this.renderChunk();
     if (this.showSettings) this.renderSettings();
   }
@@ -509,6 +583,172 @@ class Reader {
     slider.style.setProperty('--p', this.percent() + '%');
     $<HTMLButtonElement>('[data-act="prev"]', this.el).disabled = this.isFirst();
     $<HTMLButtonElement>('[data-act="next"]', this.el).disabled = this.isLast();
+    $('.eta', this.el).textContent = this.etaText();
+    if (this.showToc) this.renderToc();
+  }
+
+  /* --- time left --- */
+  private chunkWords = new Map<number, number>();
+  private wordsOf(from: number, to: number): number {
+    let n = 0;
+    for (let i = from; i < to; i++) n += countWords(this.flow[i].text);
+    return n;
+  }
+  private wordsPerScreen(): number {
+    const c = this.chunks[this.chunk];
+    let words = this.chunkWords.get(this.chunk);
+    if (words === undefined) { words = this.wordsOf(c.start, c.end); this.chunkWords.set(this.chunk, words); }
+    return Math.max(1, Math.round(words / Math.max(1, this.screens)));
+  }
+  private etaText(): string {
+    if (!this.flow.length) return '';
+    const end = chapterEnd(this.toc, this.index, this.flow.length);
+    const chapter = this.speed.minutesFor(this.wordsOf(this.index, end));
+    const book = this.speed.minutesFor(this.wordsOf(this.index, this.flow.length));
+    return `≈ ${formatMinutes(chapter)} para acabar el capítulo · ${formatMinutes(book)} para acabar el libro`;
+  }
+
+  /* --- warm light, wake lock, fullscreen --- */
+  private applyWarmth(): void {
+    $('.warmth', this.el).style.opacity = String((this.library.settings.warmth / 100) * 0.45);
+  }
+  private async requestWakeLock(): Promise<void> {
+    try {
+      const nav = navigator as Navigator & { wakeLock?: { request(type: 'screen'): Promise<{ release(): Promise<void> }> } };
+      if (!nav.wakeLock || document.hidden) return;
+      this.wakeLock = await nav.wakeLock.request('screen');
+    } catch { /* not allowed here */ }
+  }
+  private toggleFullscreen(): void {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
+    else document.documentElement.requestFullscreen().catch(() => undefined);
+    setTimeout(() => this.showSettings && this.renderSettings(), 300);
+  }
+
+  /* --- table of contents --- */
+  private toggleToc(open: boolean): void {
+    this.showToc = open;
+    this.renderToc();
+  }
+  private renderToc(): void {
+    const slot = $('.toc-slot', this.el);
+    if (!this.showToc) { slot.innerHTML = ''; return; }
+    const current = chapterStart(this.toc, this.index);
+    slot.innerHTML = `<nav class="toc" aria-label="Índice"><h3>Índice</h3>${
+      this.toc.length ? this.toc.map(e => `<button type="button" class="l${e.level}${e.index === current ? ' current' : ''}" data-act="toc-go" data-value="${e.index}">
+        <span class="t">${esc(e.title)}${e.subtitle ? `<span class="s">${esc(e.subtitle)}</span>` : ''}</span><span class="pg">${e.page}</span></button>`).join('')
+      : '<p class="empty">Este libro no tiene capítulos detectados.</p>'}</nav>`;
+    slot.querySelector('.current')?.scrollIntoView({ block: 'center' });
+  }
+
+  /* --- read aloud --- */
+  private toggleTts(open: boolean): void {
+    this.ttsOpen = open;
+    if (!open) { this.tts?.stop(); this.clearSpeaking(); }
+    this.renderTts();
+  }
+  private ensureTts(): ReadAloud {
+    if (!this.tts) {
+      this.tts = new ReadAloud(i => this.flow[i]?.text, {
+        paragraph: i => this.showSpeaking(i),
+        word: (i, start, end) => {
+          const el = this.columns.querySelector<HTMLElement>(`[data-i="${i}"]`);
+          highlightRange('tts-word', el ? rangeForText(el, start, end) : null);
+        },
+        end: () => { this.clearSpeaking(); this.renderTts(); },
+        error: msg => { this.ttsMsg = msg; this.clearSpeaking(); this.renderTts(); },
+      });
+      if (ReadAloud.supported()) speechSynthesis.addEventListener('voiceschanged', () => this.ttsOpen && this.renderTts(), { once: true });
+    }
+    return this.tts;
+  }
+  private ttsPlayPause(): void {
+    const tts = this.ensureTts();
+    this.ttsMsg = '';
+    if (!tts.active) tts.start(this.index);
+    else if (tts.isPaused) tts.resume();
+    else tts.pause();
+    this.renderTts();
+  }
+  private showSpeaking(i: number): void {
+    this.clearSpeaking();
+    let el = this.columns.querySelector<HTMLElement>(`[data-i="${i}"]`);
+    const c = this.chunks[this.chunk];
+    if (!el || i < c.start || i >= c.end || this.columnOf(el) !== this.screen) {
+      // Paragraph not on this screen: bring the reader to it (same chunk: just the screen).
+      if (el && i >= c.start && i < c.end) this.setScreen(this.columnOf(el));
+      else { this.goToIndex(i); el = null; }
+    }
+    if (el) el.classList.add('speaking');
+    else requestAnimationFrame(() => this.columns.querySelector(`[data-i="${i}"]`)?.classList.add('speaking'));
+  }
+  private clearSpeaking(): void {
+    highlightRange('tts-word', null);
+    this.columns.querySelectorAll('.speaking').forEach(e => e.classList.remove('speaking'));
+  }
+  private renderTts(): void {
+    const slot = $('.tts-slot', this.el);
+    $('.icon-btn.voice', this.el).classList.toggle('on', this.ttsOpen);
+    if (!this.ttsOpen) { slot.innerHTML = ''; return; }
+    const tts = this.ensureTts();
+    const voices = ReadAloud.voices();
+    const playing = tts.active && !tts.isPaused;
+    slot.innerHTML = `<div class="tts" role="region" aria-label="Lectura en voz alta">
+      <button type="button" class="play" data-act="tts-play" aria-label="${playing ? 'Pausar' : 'Leer'}">${playing ? '❚❚' : '▶'}</button>
+      <button type="button" class="sec" data-act="tts-stop">Detener</button>
+      <div class="rate"><button type="button" class="sec" data-act="tts-rate" data-value="-0.1" aria-label="Más lento">−</button><span>${tts.rate.toFixed(1)}×</span><button type="button" class="sec" data-act="tts-rate" data-value="0.1" aria-label="Más rápido">+</button></div>
+      ${voices.length ? `<select data-act="tts-voice" aria-label="Voz">${voices.map(v => `<option value="${esc(v.name)}" ${v.name === tts.voiceName ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select>` : ''}
+      ${this.ttsMsg ? `<span class="msg">${esc(this.ttsMsg)}</span>` : (!ReadAloud.supported() ? '<span class="msg">Este navegador no puede leer en voz alta.</span>' : (!voices.length ? '<span class="msg">No hay voces instaladas en este dispositivo.</span>' : ''))}
+    </div>`;
+  }
+
+  /* --- burst mode (RSVP) --- */
+  private openRsvp(): void {
+    this.tts?.stop(); this.clearSpeaking(); this.renderTts();
+    const words = rsvpWords(this.flow, this.index);
+    if (!words.length) return;
+    const slot = $('.rsvp-slot', this.el);
+    slot.innerHTML = `<div class="rsvp" role="dialog" aria-label="Modo ráfaga">
+      <div class="rsvp-top"><span>Modo ráfaga · una palabra a la vez</span><button type="button" class="icon-btn" data-act="rsvp-close" aria-label="Cerrar">✕</button></div>
+      <div class="rsvp-stage" data-act="rsvp-play"><div class="rsvp-rule rule-top"></div><div class="rsvp-word"><span class="l"></span><span class="o"></span><span class="r"></span></div><div class="rsvp-rule rule-bottom"></div>
+        <div class="rsvp-hint">Toca para pausar o continuar. Por encima de 400 ppm la comprensión baja.</div></div>
+      <div class="rsvp-bar"><i style="width:0%"></i></div>
+      <div class="rsvp-controls"></div>
+    </div>`;
+    this.rsvp = new Rsvp(words, (w, pos) => this.showRsvpWord(w, pos), () => this.renderRsvpControls());
+    this.rsvp.wpm = Number(read('bionic-reader:rsvp-wpm', 300)) || 300;
+    this.rsvp.seek(0);
+    this.renderRsvpControls();
+    this.rsvp.play();
+    this.renderRsvpControls();
+  }
+  private showRsvpWord(w: RsvpWord, pos: number): void {
+    const letters = Array.from(w.text);
+    $('.rsvp-word .l', this.el).textContent = letters.slice(0, w.orp).join('');
+    $('.rsvp-word .o', this.el).textContent = letters[w.orp] ?? '';
+    $('.rsvp-word .r', this.el).textContent = letters.slice(w.orp + 1).join('');
+    $('.rsvp-bar i', this.el).style.width = `${(pos / Math.max(1, this.rsvp!.length - 1)) * 100}%`;
+  }
+  private renderRsvpControls(): void {
+    const r = this.rsvp;
+    const box = this.el.querySelector<HTMLElement>('.rsvp-controls');
+    if (!r || !box) return;
+    write('bionic-reader:rsvp-wpm', r.wpm);
+    box.innerHTML = `
+      <button type="button" data-act="rsvp-back" title="Frase anterior">↺ Frase</button>
+      <button type="button" class="play" data-act="rsvp-play">${r.playing ? 'Pausar' : (r.position >= r.length - 1 ? 'Fin' : 'Continuar')}</button>
+      <div class="wpm"><button type="button" data-act="rsvp-step" data-value="-25" aria-label="Más lento">−</button>
+        <input type="range" min="100" max="800" step="25" value="${r.wpm}" data-act="rsvp-wpm" aria-label="Palabras por minuto" /><span>${r.wpm} ppm</span>
+        <button type="button" data-act="rsvp-step" data-value="25" aria-label="Más rápido">+</button></div>`;
+  }
+  private closeRsvp(): void {
+    const r = this.rsvp;
+    if (!r) return;
+    r.pause();
+    const w = rsvpWords(this.flow, this.index)[r.position];
+    this.rsvp = undefined;
+    $('.rsvp-slot', this.el).innerHTML = '';
+    if (w && w.paragraph !== this.index) this.goToIndex(w.paragraph);
   }
 
   private observeSize(): void {
@@ -543,6 +783,7 @@ class Reader {
     this.screen = screen;
     const top = this.topIndex(screen);
     if (top !== null) this.index = top;
+    this.speed.screenShown(this.wordsPerScreen());
     this.layout();
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.save(), 300);

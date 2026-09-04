@@ -48,7 +48,7 @@ export interface ReadingProgress {
 }
 
 export type ReaderTheme = 'white' | 'sepia' | 'green' | 'dark';
-export type ReaderFont = 'serif' | 'sans';
+export type ReaderFont = 'serif' | 'sans' | 'lexend' | 'atkinson';
 
 export interface ReaderSettings {
   bionic: boolean;
@@ -58,6 +58,8 @@ export interface ReaderSettings {
   lineHeight: number;
   theme: ReaderTheme;
   font: ReaderFont;
+  /** Warm light overlay, 0-100. */
+  warmth: number;
 }
 
 export const DEFAULT_SETTINGS: ReaderSettings = {
@@ -67,4 +69,5 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   lineHeight: 1.6,
   theme: 'sepia',
   font: 'serif',
+  warmth: 0,
 };
