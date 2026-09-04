@@ -1,14 +1,9 @@
 /**
- * Page-turn gesture and animation for the reader.
- *
- * The reader shows one screen of a chapter at a time. A turn is drawn as a
- * flat paper fold: the sheet being turned is a clone of its screen, clipped
- * at a vertical crease that travels across the stage; the part already
- * turned lies over it as the light back of the sheet, and the page beneath
- * appears on the other side of the crease. Going forward the current sheet
- * folds toward the spine (left edge); going back, the previous sheet unfolds
- * from it. A drag makes the crease follow the finger and completes or snaps
- * back on release; buttons and keys play the full turn.
+ * Page-turn gesture and animation for the reader, Kindle style: the pages
+ * slide horizontally. The outgoing screen (a clone of the current one) moves
+ * out while the incoming screen (a clone of the target, rendered underneath
+ * in the meantime) moves in beside it, following the finger during a drag
+ * and easing out on release. Buttons and keys play the full slide.
  *
  * Framework-agnostic: works on plain DOM elements.
  */
@@ -16,12 +11,12 @@
 export type TurnDirection = 1 | -1;
 
 export interface PageTurnHost {
-  /** Positioned, overflow-hidden container the fold is drawn in. */
+  /** Positioned, overflow-hidden container the slide is drawn in. */
   stage: HTMLElement;
   /** Element holding the screen currently rendered underneath. */
   columns(): HTMLElement;
   canTurn(dir: TurnDirection): boolean;
-  /** Apply the page change underneath the fold. */
+  /** Apply the page change underneath the slide. */
   turn(dir: TurnDirection): void;
   /** Position to restore when a drag is cancelled. */
   snapshot(): unknown;
@@ -30,13 +25,13 @@ export interface PageTurnHost {
 
 const DRAG_START = 10;
 const TAP_SLOP = 8;
-const FLIP_MS = 420;
+const SLIDE_MS = 320;
 
 export class PageTurn {
+  /** Clone of the outgoing screen. */
   private leaf?: HTMLElement;
-  private back?: HTMLElement;
-  private shadow?: HTMLElement;
-  private under?: HTMLElement;
+  /** Clone of the incoming screen. */
+  private incoming?: HTMLElement;
   private dir: TurnDirection = 1;
   private progress = 0;
   private snap: unknown;
@@ -124,9 +119,8 @@ export class PageTurn {
       return;
     }
     if (!this.leaf) return;
-    const travel = Math.max(120, this.host.stage.clientWidth * 0.6);
     const along = (this.dir === 1 ? -dx : dx) - DRAG_START;
-    this.set(clamp(along / travel, 0, 1));
+    this.set(clamp(along / Math.max(1, this.host.stage.clientWidth), 0, 1));
   }
 
   private up(e: PointerEvent): void {
@@ -147,7 +141,7 @@ export class PageTurn {
   /** Release happened while the fold was still being prepared. */
   private pendingSettle: boolean | null = null;
 
-  /* --------------------------------------------------------------- fold */
+  /* -------------------------------------------------------------- slide */
 
   private async begin(dir: TurnDirection): Promise<boolean> {
     const stage = this.host.stage;
@@ -158,62 +152,39 @@ export class PageTurn {
     this.snap = this.host.snapshot();
     this.pendingSettle = null;
 
-    const shadow = el('leaf-shadow');
-    const back = el('leaf-back');
-    let leaf: HTMLElement;
-
-    if (dir === 1) {
-      // Forward: the current screen is the sheet; the next page is already underneath.
-      leaf = el('leaf');
-      leaf.appendChild(cloneColumns(source));
-      this.host.turn(dir);
-    } else {
-      // Back: keep a copy of the current screen on top, let the previous page render
-      // underneath, then use that previous page as the sheet unfolding from the spine.
-      const under = el('leaf-under');
-      under.appendChild(cloneColumns(source));
-      stage.appendChild(under);
-      this.under = under;
-      this.host.turn(dir);
-      await nextFrames(2);
-      if (!this.under) return false; // detached meanwhile
-      leaf = el('leaf');
-      leaf.appendChild(cloneColumns(this.host.columns()));
-    }
-
-    stage.appendChild(shadow);
+    // Cover the stage with the current screen, let the target render underneath,
+    // then clone it as the incoming page.
+    const leaf = el('leaf');
+    leaf.appendChild(cloneColumns(source));
     stage.appendChild(leaf);
-    stage.appendChild(back);
     this.leaf = leaf;
-    this.back = back;
-    this.shadow = shadow;
+    this.host.turn(dir);
+    await nextFrames(2);
+    if (this.leaf !== leaf) return false; // detached meanwhile
+    const incoming = el(`leaf-in ${dir === 1 ? 'from-right' : 'from-left'}`);
+    incoming.appendChild(cloneColumns(this.host.columns()));
+    stage.appendChild(incoming);
+    this.incoming = incoming;
     this.set(0);
     if (this.pendingSettle !== null) { const c = this.pendingSettle; this.pendingSettle = null; this.settle(c); }
     return true;
   }
 
-  /** Draw the fold for progress p (0 = untouched, 1 = fully turned). */
+  /** Draw the slide for progress p (0 = untouched, 1 = fully turned). */
   private set(p: number): void {
     this.progress = p;
-    if (!this.leaf || !this.back || !this.shadow) return;
+    if (!this.leaf || !this.incoming) return;
     const w = this.host.stage.clientWidth;
-    // Crease position: forward it travels from the free edge to the spine, back the other way.
-    const crease = this.dir === 1 ? w * (1 - p) : w * p;
-    const edge = Math.max(0, 2 * crease - w);         // free edge of the folded part
-    const backWidth = Math.max(0, crease - edge);
-    this.leaf.style.clipPath = `inset(0 ${Math.max(0, w - crease).toFixed(1)}px 0 0)`;
-    this.back.style.left = `${edge.toFixed(1)}px`;
-    this.back.style.width = `${backWidth.toFixed(1)}px`;
-    this.back.style.opacity = backWidth > 0.5 ? '1' : '0';
-    this.shadow.style.left = `${crease.toFixed(1)}px`;
-    this.shadow.style.opacity = (Math.sin(p * Math.PI) * 0.85).toFixed(3);
+    const shift = w * p * this.dir; // forward moves left, back moves right
+    this.leaf.style.transform = `translateX(${(-shift).toFixed(1)}px)`;
+    this.incoming.style.transform = `translateX(${(w * this.dir - shift).toFixed(1)}px)`;
   }
 
   private settle(complete: boolean): void {
     if (!this.leaf) return;
     const from = this.progress;
     const to = complete ? 1 : 0;
-    const duration = Math.max(160, FLIP_MS * Math.abs(to - from));
+    const duration = Math.max(140, SLIDE_MS * Math.abs(to - from));
     const t0 = performance.now();
     const step = (now: number) => {
       const t = clamp((now - t0) / duration, 0, 1);
@@ -228,10 +199,8 @@ export class PageTurn {
 
   private cleanup(): void {
     this.leaf?.remove();
-    this.back?.remove();
-    this.shadow?.remove();
-    this.under?.remove();
-    this.leaf = this.back = this.shadow = this.under = undefined;
+    this.incoming?.remove();
+    this.leaf = this.incoming = undefined;
     this.progress = 0;
     this.busy = false;
   }
