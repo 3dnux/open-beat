@@ -76,3 +76,11 @@ npm test
 - `src/app/dj/` - Componentes de la interfaz de DJ
 - `src/app/home/` - Componentes de la página principal
 - `src/app/services/` - Servicios para procesamiento de audio, análisis y reproducción
+
+## Demo extra: Cenizas del Abismo (juego 2D)
+
+En `public/inferno/index.html` hay un demo de acción 2D estilo *Blasphemous* hecho en HTML5 Canvas puro, sin dependencias: un guerrero con espadón se enfrenta a Azkaroth, una bestia gigante, en un escenario infernal.
+
+- Abre el archivo directamente en el navegador, o con `npm start` visita `http://localhost:4200/inferno/index.html`.
+- Controles: `A/D` mover, `Espacio` saltar, `J/X` atacar (combo de 3 golpes), `K/Shift` rodar (invulnerable), `Q` frasco curativo, `Enter` empezar/reintentar. En móvil aparecen botones táctiles.
+- El jefe telegrafía sus ataques con un destello: garra, salto con onda de choque, aliento de fuego a ras de suelo, lluvia de meteoros y, en su fase de furia (50 % de vida), una embestida. Llenar la barra dorada lo aturde y recibe daño extra.
